@@ -97,6 +97,7 @@ static uint8_t    *CrcBuf;
 static char       *DiskBuf;       // bigger output buffer: fewer, larger disk writes
 static uint32_t    CrcTable[256];
 static uint8_t     Verify = 0;      // /V given: check downloads with CRC32
+static uint8_t     Profile = 0;     // /T given: print the speed of every megabyte
 static uint8_t    *DummyA;
 static uint8_t    *DummyB;
 static uint16_t    RxPos = 0;
@@ -116,7 +117,7 @@ static void usage( void ) {
     "ectest <host> <port> GET <path> [localfile]\n"
     "ectest <host> <port> GETDIR <path> <destfolder>\n"
     "  (add /V to GET or GETDIR to verify every download with a CRC32 check)\n"
-    "ectest <host> <port> NOP | NOP2 | CONNECT | CONNECTQ   (diagnostics)\n\n"
+    "ectest <host> <port> NOP | NOP2 | CONNECT | CONNECTQ   (diagnostics)\n  (add /T to GET to print the speed of every megabyte)\n\n"
     "Example: ectest 10.0.2.2 6502 LIST /\n" );
   exit( 1 );
 }
@@ -533,6 +534,8 @@ static int fetchFile( const char *remote, const char *localName, int mode, uint3
 
   uint32_t step       = (mode == 0) ? 16384ul : 262144ul;
   uint32_t nextReport = step;
+  uint32_t nextMark   = 1048576UL;       // /T: next megabyte boundary
+  clockTicks_t markTicks = startTime;
   uint32_t remaining  = size;
   int      rc = FETCH_OK;
 
@@ -566,6 +569,19 @@ static int fetchFile( const char *remote, const char *localName, int mode, uint3
         fflush( stdout );
       }
       nextReport += step;
+    }
+
+    // /T: speed of every single megabyte, to see how the speed develops.
+    if ( Profile && ((size - remaining) >= nextMark) ) {
+
+      clockTicks_t now = TIMER_GET_CURRENT( );
+      uint32_t ms = uint32_t(now - markTicks) * 55;
+
+      printf( "\n%2lu MB: %lu KB/s", (unsigned long)(nextMark >> 20),
+              ms ? (unsigned long)(1024000UL / ms) : 0UL );
+
+      markTicks = now;
+      nextMark += 1048576UL;
     }
 
   }
@@ -848,12 +864,16 @@ static void quitHost( void ) {
 
 int main( int argc, char *argv[] ) {
 
-  fprintf( stderr, "Easy Commander test client (ECTEST) v9 - built " __DATE__ "\n\n" );
+  fprintf( stderr, "Easy Commander test client (ECTEST) v10 - built " __DATE__ "\n\n" );
 
   // /V may appear anywhere: take it out of the argument list.
   for ( int a = 1; a < argc; a++ ) {
-    if ( stricmp( argv[a], "/V" ) == 0 ) {
-      Verify = 1;
+    int isV = ( stricmp( argv[a], "/V" ) == 0 );
+    int isT = ( stricmp( argv[a], "/T" ) == 0 );
+
+    if ( isV || isT ) {
+      if ( isV ) Verify = 1;
+      else       Profile = 1;
       for ( int b = a; b < argc - 1; b++ ) argv[b] = argv[b+1];
       argc--;
       a--;
