@@ -1049,6 +1049,8 @@ static u32           TreeBytes = 0;
 static int           TreeTooBig = 0;
 
 static uint8_t      *CrcBuf;
+#define DISK_BUF_SIZE 16384u
+static char         *DiskBuf;         // bigger output buffer: fewer, larger disk writes
 static uint32_t      CrcTable[256];
 static int           Verify = 0;          // F9: check every file with CRC32
 static int           OverwriteMode = 0;   // 0 ask, 1 overwrite all, 2 skip all
@@ -1427,6 +1429,9 @@ static int downloadFile( const char *remote, const char *localName, u32 *gotOut 
     return FETCH_SKIP;
   }
 
+  // Write to the disk in big blocks instead of one network packet at a time.
+  if ( DiskBuf ) setvbuf( f, DiskBuf, _IOFBF, DISK_BUF_SIZE );
+
   CtrlBreakDetected = 0;
 
   u32 offset = 0;
@@ -1510,7 +1515,13 @@ static int downloadFile( const char *remote, const char *localName, u32 *gotOut 
     if ( (n == 0) || (offset >= total) ) break;
   }
 
-  fclose( f );
+  // The last buffer is written when the file is closed: check that too.
+  int closeRc = fclose( f );
+
+  if ( (rc == FETCH_OK) && (closeRc != 0) ) {
+    rc = FETCH_DISK;
+    ErrMsg = "cannot write to the disk (full?)";
+  }
 
   if ( (rc == FETCH_OK) && (offset < total) ) {
     rc = FETCH_SKIP;
@@ -2403,6 +2414,7 @@ int main( int argc, char *argv[] ) {
   TmpItems    = (Item *)malloc( MAX_ITEMS * sizeof( Item ) );
   TreeBuf     = (uint8_t *)malloc( TREE_BUF_SIZE );
   CrcBuf      = (uint8_t *)malloc( 4096 );
+  DiskBuf     = (char *)malloc( DISK_BUF_SIZE );     // optional: without it the default buffering is used
 
   if ( !Rx || !Left.items || !Right.items || !TmpItems || !TreeBuf || !CrcBuf ) {
     fprintf( stderr, "Not enough memory.\n" );

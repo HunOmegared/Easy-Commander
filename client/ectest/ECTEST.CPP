@@ -93,6 +93,8 @@ static TcpSocket  *Sock;
 static uint8_t    *Rx;
 static uint8_t    *TreeBuf;
 static uint8_t    *CrcBuf;
+#define DISK_BUF_SIZE 16384u
+static char       *DiskBuf;       // bigger output buffer: fewer, larger disk writes
 static uint32_t    CrcTable[256];
 static uint8_t     Verify = 0;      // /V given: check downloads with CRC32
 static uint8_t    *DummyA;
@@ -497,6 +499,9 @@ static int fetchFile( const char *remote, const char *localName, int mode, uint3
     return FETCH_SKIP;
   }
 
+  // Write to the disk in big blocks instead of one network packet at a time.
+  if ( DiskBuf ) setvbuf( f, DiskBuf, _IOFBF, DISK_BUF_SIZE );
+
   sprintf( cmd, "GET %s", remote );
 
   if ( sendCommand( cmd ) ) {
@@ -565,7 +570,11 @@ static int fetchFile( const char *remote, const char *localName, int mode, uint3
 
   }
 
-  fclose( f );
+  // The last buffer is written when the file is closed: check that too.
+  if ( (fclose( f ) != 0) && (rc == FETCH_OK) ) {
+    fprintf( stderr, "\nError writing to disk (disk full?)\n" );
+    rc = FETCH_FATAL;
+  }
 
   uint32_t received = size - remaining;
   if ( gotOut ) *gotOut = received;
@@ -839,7 +848,7 @@ static void quitHost( void ) {
 
 int main( int argc, char *argv[] ) {
 
-  fprintf( stderr, "Easy Commander test client (ECTEST) v8 - built " __DATE__ "\n\n" );
+  fprintf( stderr, "Easy Commander test client (ECTEST) v9 - built " __DATE__ "\n\n" );
 
   // /V may appear anywhere: take it out of the argument list.
   for ( int a = 1; a < argc; a++ ) {
@@ -926,6 +935,10 @@ int main( int argc, char *argv[] ) {
     if ( Rx == NULL ) {
       fprintf( stderr, "Not enough memory\n" );
       exit( 1 );
+    }
+
+    if ( (cmdId == CMD_GET) || (cmdId == CMD_GETDIR) ) {
+      DiskBuf = (char *)malloc( DISK_BUF_SIZE );    // optional
     }
 
     if ( cmdId == CMD_GETDIR ) {
