@@ -562,7 +562,9 @@ static int fetchFile( const char *remote, const char *localName, int mode, uint3
 
     if ( (size - remaining) >= nextReport ) {
       if ( mode == 0 ) {
-        printf( "\r%lu / %lu bytes", (unsigned long)(size - remaining), (unsigned long)size );
+        if ( !Profile ) {
+          printf( "\r%lu / %lu bytes", (unsigned long)(size - remaining), (unsigned long)size );
+        }
       }
       else {
         putchar( '.' );
@@ -577,7 +579,7 @@ static int fetchFile( const char *remote, const char *localName, int mode, uint3
       clockTicks_t now = TIMER_GET_CURRENT( );
       uint32_t ms = uint32_t(now - markTicks) * 55;
 
-      printf( "\n%2lu MB: %lu KB/s", (unsigned long)(nextMark >> 20),
+      printf( "%2lu MB: %lu KB/s\n", (unsigned long)(nextMark >> 20),
               ms ? (unsigned long)(1024000UL / ms) : 0UL );
 
       markTicks = now;
@@ -864,7 +866,7 @@ static void quitHost( void ) {
 
 int main( int argc, char *argv[] ) {
 
-  fprintf( stderr, "Easy Commander test client (ECTEST) v10 - built " __DATE__ "\n\n" );
+  fprintf( stderr, "Easy Commander test client (ECTEST) v11 - built " __DATE__ "\n\n" );
 
   // /V may appear anywhere: take it out of the argument list.
   for ( int a = 1; a < argc; a++ ) {
