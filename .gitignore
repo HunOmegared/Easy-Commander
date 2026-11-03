@@ -1,0 +1,21 @@
+# Build output
+*.obj
+*.OBJ
+*.exe
+*.EXE
+*.map
+*.MAP
+*.err
+*.ERR
+host/easycommander
+host/easycommander-host
+
+# Files that belong to the mTCP source tree and are only copied next to the
+# DOS sources while building (see docs/BUILDING.md)
+EC.CFG
+ECTEST.CFG
+NC.CFG
+
+# Editor leftovers
+*.bak
+*~
