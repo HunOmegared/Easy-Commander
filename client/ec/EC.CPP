@@ -913,11 +913,31 @@ static void drawPanel( Panel *p, int x0, int active ) {
   putStr( x0 + 2, 23, buf, A_BORDER );
 }
 
+// The BIOS keeps the state of Shift, Ctrl and Alt at 0040:0017
+// (bit 0 right Shift, 1 left Shift, 2 Ctrl, 3 Alt).
+static u8 shiftFlags( void ) {
+  return *(volatile u8 __far *)MK_FP( 0x40, 0x17 );
+}
+
+#define SHIFT_ALT 0x08
+
+static int KeyBarAlt = 0;      // which labels are on the screen right now
+
+// The bottom line shows what the function keys do.  While Alt is held down
+// it shows what the Alt+function keys do, like Norton Commander.
 static void drawKeyBar( void ) {
 
-  static const char *labels[10] = {
+  static const char *normal[10] = {
     "Help", "Reconn", "", "", "Get", "", "MkDir", "Delete", "Opts", "Quit"
   };
+
+  static const char *withAlt[10] = {
+    "Host", "Drive", "", "", "", "", "", "", "", ""
+  };
+
+  KeyBarAlt = (shiftFlags( ) & SHIFT_ALT) ? 1 : 0;
+
+  const char **labels = KeyBarAlt ? withAlt : normal;
 
   for ( int i = 0; i < 10; i++ ) {
 
@@ -2475,6 +2495,10 @@ int main( int argc, char *argv[] ) {
 
     if ( !kbhit( ) ) {
       pump( );
+
+      // Alt pressed or released: switch the labels in the bottom line.
+      if ( ((shiftFlags( ) & SHIFT_ALT) != 0) != (KeyBarAlt != 0) ) drawKeyBar( );
+
       continue;
     }
 
