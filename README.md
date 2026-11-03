@@ -34,6 +34,7 @@ with their subfolders, keeping the structure.
 * Cancel a download with Esc; existing files are never overwritten without asking.
 * Delete files and folders on the *local* side (F8). The host is always read-only.
 * Switch drives (Alt+F2) and host (Alt+F1).
+* Uses about 286 KB of conventional memory while running (measured on MS-DOS 6.22 with a Realtek packet driver).
 
 ## Quick start
 
@@ -94,9 +95,6 @@ suspect; Open Watcom 1.9 is untested).
 current date).
 * Download only; there is no upload.
 * The host cannot be found automatically yet: give its address.
-* Memory use has not been measured yet: while the program runs, F1 shows the free
-conventional memory; compare it with the value `MEM` reports before starting `EC`.
-Transfer speed on real hardware has not been recorded yet.
 
 ## Roadmap
 
