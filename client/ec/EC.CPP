@@ -1066,6 +1066,7 @@ static int inputBox( const char *title, const char *prompt, char *buf, int maxle
   int x = (SCR_W - w) / 2;
   int y = (25 - h) / 2;
   int len = (int)strlen( buf );
+  int fresh = (len > 0);              // text that was there at the start: the first typed character replaces it
 
   while ( 1 ) {
 
@@ -1085,10 +1086,14 @@ static int inputBox( const char *title, const char *prompt, char *buf, int maxle
       len--;
       buf[len] = 0;
     }
-    else if ( (k >= 32) && (k < 127) && (len < maxlen) ) {
-      buf[len++] = (char)k;
-      buf[len] = 0;
+    else if ( (k >= 32) && (k < 127) ) {
+      if ( fresh ) { len = 0; buf[0] = 0; }
+      if ( len < maxlen ) {
+        buf[len++] = (char)k;
+        buf[len] = 0;
+      }
     }
+    fresh = 0;
   }
 }
 
@@ -3335,7 +3340,7 @@ static void cmdHelp( void ) {
   lines[1]  = "Enter       open a folder (.. goes up)";
   lines[2]  = "Tab         switch panel";
   lines[3]  = "Insert      select / unselect and move down";
-  lines[4]  = "+  -  *     select all files / none / invert";
+  lines[4]  = "+  -  *     select / unselect by mask, invert";
   lines[5]  = "F5          download selected items to the right panel";
   lines[6]  = "F7          make a folder (right panel)";
   lines[7]  = "F8          delete (right panel only, asks first)";
@@ -3367,6 +3372,70 @@ static void cmdDosScreen( void ) {
   r.h.ah = 0x01;                   // hide the cursor again; the caller redraws
   r.x.cx = 0x2000;
   int86( 0x10, &r, &r );
+}
+
+// DOS style wildcards: * (any number of characters) and ? (one character),
+// no difference between upper and lower case.
+static int wildPart( const char *m, const char *s ) {
+  while ( *m ) {
+    if ( *m == '*' ) {
+      m++;
+      if ( !*m ) return 1;
+      while ( 1 ) {
+        if ( wildPart( m, s ) ) return 1;
+        if ( !*s ) return 0;
+        s++;
+      }
+    }
+    if ( !*s ) return 0;
+    if ( (*m != '?') && (toupper( (unsigned char)*m ) != toupper( (unsigned char)*s )) ) return 0;
+    m++;
+    s++;
+  }
+  return *s == 0;
+}
+
+// The name and the extension are compared separately, as DOS does: "*.*"
+// also matches a name without an extension, "READ*" means "READ*.*".
+static int wildMatch( const char *mask, const char *name ) {
+
+  char mn[24], me[24], nn[16], ne[16];
+  const char *d;
+
+  d = strrchr( mask, '.' );
+  if ( d ) { strncpy( mn, mask, d - mask ); mn[d - mask] = 0; strcpy( me, d + 1 ); }
+  else     { strcpy( mn, mask ); strcpy( me, "*" ); }
+
+  d = strrchr( name, '.' );
+  if ( d ) { strncpy( nn, name, d - name ); nn[d - name] = 0; strcpy( ne, d + 1 ); }
+  else     { strcpy( nn, name ); ne[0] = 0; }
+
+  return wildPart( mn, nn ) && wildPart( me, ne );
+}
+
+// + and -: ask for a mask and select (or unselect) the files that match.
+// Folders are never selected this way (as with "select all"), but - also
+// unselects them, so that - with *.* clears everything.
+static void selectMask( Panel *p, int on ) {
+
+  char mask[24];
+  strcpy( mask, "*.*" );
+
+  if ( !inputBox( on ? "Select files" : "Unselect files", "Mask (for example *.TXT):", mask, 20 ) ) return;
+
+  int n = 0;
+
+  for ( int i = 0; i < p->count; i++ ) {
+    Item *it = &p->items[i];
+    if ( strcmp( it->name, ".." ) == 0 ) continue;
+    if ( on && it->isDir ) continue;
+    if ( wildMatch( mask, it->name ) ) {
+      it->sel = on ? 1 : 0;
+      n++;
+    }
+  }
+
+  if ( (n == 0) && on ) uiMessage( "Select files", "No file matches that mask.", NULL );
 }
 
 static void selectAll( Panel *p, int mode ) {   // 0 none, 1 all files, 2 invert files
@@ -3404,8 +3473,8 @@ static void handleKey( int k ) {
       p->cur++;
       break;
 
-    case '+':    selectAll( p, 1 ); break;
-    case '-':    selectAll( p, 0 ); break;
+    case '+':    selectMask( p, 1 ); break;
+    case '-':    selectMask( p, 0 ); break;
     case '*':    selectAll( p, 2 ); break;
 
     case K_F3:   cmdView( ); break;

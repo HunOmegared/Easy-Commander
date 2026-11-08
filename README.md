@@ -10,15 +10,9 @@ setting up FTP, SMB1 or serial transfers, which are all awkward. Here the host
 is a single executable and the client is a two-panel program you already know
 how to use.
 
-```
-+== \ ===============================++== C:\DL ============================+
-| EMPTY        <DIR>  26-11-01 10:59 || ..          <UP-DIR>                |
-| LONGFO~1     <DIR>  26-11-01 11:00 ||                                    |
-| TESTFO~1     <DIR>  26-11-01 11:05 ||                                    |
-| NCT.IMA     1474560 26-11-01 01:25 ||                                    |
-+== Host 192.168.1.10 ===============++== Local ============================+
-1Help 2Reconn 3 4 5Get 6 7MkDir 8Delete 9Opts 10Quit
-```
+![Easy Commander: the host on the left, a local DOS folder on the right](docs/screenshot.png)
+
+*Easy Commander in 86Box: the host's folder on the left, the local DOS folder on the right.*
 
 ## Status
 
@@ -72,7 +66,8 @@ documentation):
 | Enter | open a folder (`..` goes up) |
 | Tab | switch panel |
 | Insert | select / unselect, move down |
-| `+` `-` `*` | select all files / none / invert |
+| `+` `-` | select / unselect files by a mask such as `*.TXT` or `READ*` (Enter alone = `*.*`, all) |
+| `*` | invert the selection |
 | F3 | view the file under the cursor (in the viewer: F4 hex/text, F7 search, Left/Right sideways, Esc or F10 close) |
 | F5 | download the selected items (or the one under the cursor) to the right panel's folder |
 | F7 | make a folder (right panel) |
@@ -148,7 +143,7 @@ download itself unless the fast CRC32 loop (F9) is used.
 ## Roadmap
 
 * Test on more hardware (other network cards and packet drivers, 286 and 386 machines, less RAM).
-* Select by mask (`+` with `*.TXT`), keep file dates.
+* Keep file dates.
 
 ## License
 

@@ -30,9 +30,9 @@ HEAD
 } > "$B/ec_check.cpp"
 
 status=0
-for t in t_download t_local t_discovery t_crc t_view; do
+for t in t_download t_local t_discovery t_crc t_view t_mask; do
   echo "=== $t ==="
   g++ -std=gnu++11 -w -I"$HERE/stubs" -I"$B" -o "$B/$t" "$HERE/$t.cpp"
-  timeout 120 "$B/$t" || status=1
+  timeout 60 "$B/$t" || status=1
 done
 exit $status
