@@ -3609,7 +3609,7 @@ static void endProgram( int rc ) {
 
 int main( int argc, char *argv[] ) {
 
-  printf( "Easy Commander 0.4, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
+  printf( "Easy Commander 1.0, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
   printf( "Free software, GPLv3 or later. Built " __DATE__ ".\n\n" );
 
   setIniPath( argv[0] );
