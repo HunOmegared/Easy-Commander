@@ -91,9 +91,10 @@ documentation):
 
 ## Performance
 
-Measured on one real machine (AMD 5x86-133, 8 MB RAM, CompactFlash instead of a
-hard disk, RTL8019AS ISA card, 10 Mbit/s, Realtek packet driver), downloading a
-12 MB file:
+Measured on real machines, always downloading the same 12 MB file. All of them
+use a CompactFlash card instead of a hard disk, an RTL8019AS ISA card (10 Mbit/s)
+and the Realtek packet driver. The first test series, on the AMD 5x86-133 (8 MB
+RAM, CF card from InnoDisk):
 
 | Test | Speed |
 |---|---|
@@ -105,7 +106,7 @@ The speed is even over the whole file. Receiving and writing to the disk do
 not overlap, so their times add up; the disk side is the slower part on this
 machine. The test client's `/T` switch prints the speed of every megabyte.
 
-The same 12 MB file with Easy Commander (F5) on other setups:
+The same file with Easy Commander (F5), on the 5x86-133 and a Cyrix 486DLC (4 MB RAM):
 
 | Machine and disk | CRC32 check off | CRC32 check on |
 |---|---|---|
