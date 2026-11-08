@@ -1305,7 +1305,10 @@ static int localInfo( const char *path, u32 *size ) {
 
 // ---- the list of things to download ----
 
-static void addEntry( char type, const char *rel, u32 size ) {
+// An entry in the list: type (1 byte), size (4), DOS date (2), DOS time (2), name.
+#define ENTRY_HEAD 9
+
+static void addEntry( char type, const char *rel, u32 size, u16 date, u16 time ) {
 
   uint16_t relLen = (uint16_t)strlen( rel );
 
@@ -1314,15 +1317,17 @@ static void addEntry( char type, const char *rel, u32 size ) {
     return;
   }
 
-  if ( ((u32)TreeUsed + 5 + relLen + 1) > TREE_BUF_SIZE ) {
+  if ( ((u32)TreeUsed + ENTRY_HEAD + relLen + 1) > TREE_BUF_SIZE ) {
     TreeTooBig = 1;
     return;
   }
 
   TreeBuf[TreeUsed] = type;
   memcpy( TreeBuf + TreeUsed + 1, &size, 4 );
-  memcpy( TreeBuf + TreeUsed + 5, rel, relLen + 1 );
-  TreeUsed += 5 + relLen + 1;
+  memcpy( TreeBuf + TreeUsed + 5, &date, 2 );
+  memcpy( TreeBuf + TreeUsed + 7, &time, 2 );
+  memcpy( TreeBuf + TreeUsed + ENTRY_HEAD, rel, relLen + 1 );
+  TreeUsed += ENTRY_HEAD + relLen + 1;
   TreeEntries++;
 
   if ( type == 'D' ) {
@@ -1385,7 +1390,7 @@ static int appendTree( const char *remoteDir, const char *prefix ) {
     }
 
     sprintf( rel, "%s\\%s", prefix, name );
-    addEntry( isDir ? 'D' : 'F', rel, size );
+    addEntry( isDir ? 'D' : 'F', rel, size, date, time );
   }
 
   return 0;
@@ -1415,7 +1420,7 @@ static int buildList( Panel *p ) {
 
       char remote[300];
 
-      addEntry( 'D', it->name, 0 );
+      addEntry( 'D', it->name, 0, it->date, it->time );
       joinPath( remote, p->path, it->name );
 
       int rc = appendTree( remote, it->name );
@@ -1426,7 +1431,7 @@ static int buildList( Panel *p ) {
       }
     }
     else {
-      addEntry( 'F', it->name, it->size );
+      addEntry( 'F', it->name, it->size, it->date, it->time );
     }
   }
 
@@ -1513,7 +1518,7 @@ static void progressUpdate( int force ) {
 // The file is requested in blocks.  After every block the session is in
 // a clean state, so Esc (and a full disk) can stop the transfer without
 // breaking the connection.
-static int downloadFile( const char *remote, const char *localName, u32 *gotOut ) {
+static int downloadFile( const char *remote, const char *localName, u32 *gotOut, u16 date, u16 time ) {
 
   char line[300];
   char cmd[300];
@@ -1617,8 +1622,18 @@ static int downloadFile( const char *remote, const char *localName, u32 *gotOut 
     if ( (n == 0) || (offset >= total) ) break;
   }
 
-  // The last buffer is written when the file is closed: check that too.
+  // Write the last buffer, then give the file the date and time it has on the
+  // host (the file is flushed first: a later write would change them again).
+  int flushRc = 0;
+
+  if ( rc == FETCH_OK ) {
+    flushRc = fflush( f );
+    if ( (flushRc == 0) && (date != 0) ) _dos_setftime( fileno( f ), date, time );
+  }
+
+  // Closing can fail too (disk full).
   int closeRc = fclose( f );
+  if ( flushRc != 0 ) closeRc = flushRc;
 
   if ( (rc == FETCH_OK) && (closeRc != 0) ) {
     rc = FETCH_DISK;
@@ -2455,9 +2470,12 @@ static void cmdDownload( void ) {
 
     char type = TreeBuf[pos];
     u32 sz;
+    u16 fdate, ftime;
     memcpy( &sz, TreeBuf + pos + 1, 4 );
-    const char *rel = (const char *)(TreeBuf + pos + 5);
-    pos += 5 + (uint16_t)strlen( rel ) + 1;
+    memcpy( &fdate, TreeBuf + pos + 5, 2 );
+    memcpy( &ftime, TreeBuf + pos + 7, 2 );
+    const char *rel = (const char *)(TreeBuf + pos + ENTRY_HEAD);
+    pos += ENTRY_HEAD + (uint16_t)strlen( rel ) + 1;
 
     joinPath( local, Right.path, rel );
 
@@ -2504,7 +2522,7 @@ static void cmdDownload( void ) {
     joinPath( remote, Left.path, rel );
 
     u32 got = 0;
-    int r = downloadFile( remote, local, &got );
+    int r = downloadFile( remote, local, &got, fdate, ftime );
 
     if ( r == FETCH_OK ) {
       okFiles++;
@@ -3591,7 +3609,7 @@ static void endProgram( int rc ) {
 
 int main( int argc, char *argv[] ) {
 
-  printf( "Easy Commander 0.3.1, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
+  printf( "Easy Commander 0.4, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
   printf( "Free software, GPLv3 or later. Built " __DATE__ ".\n\n" );
 
   setIniPath( argv[0] );

@@ -32,6 +32,9 @@ host search and switching between two hosts worked on all of them.
   (F7; in hex mode type hex bytes such as `6E 50`, or a text in double quotes),
   scrolling with the cursor keys. A file on the host is read in pieces,
   so only what you look at is transferred.
+* Downloaded files keep the date and time they have on the host (folders get
+  the current date).
+* Select and unselect files by a mask (`+` and `-`, for example `*.TXT`).
 * Cancel a download with Esc; existing files are never overwritten without asking.
 * **Download only, by design:** the host shares a folder read-only and the client
   has no upload. Nothing on the host can be changed, renamed or deleted from the
@@ -143,7 +146,6 @@ download itself unless the fast CRC32 loop (F9) is used.
 ## Roadmap
 
 * Test on more hardware (other network cards and packet drivers, 286 and 386 machines, less RAM).
-* Keep file dates.
 
 ## License
 

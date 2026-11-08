@@ -50,6 +50,12 @@ int main() {
   cmdDownload();
   check("all bytes counted (270011)", ProgDone == 270011 && ProgTotal == 270011);
   check("copy identical to the host folder (incl. empty file/folder)", run("diff -r /tmp/fakehost /tmp/fakedl") == 0);
+  {
+    unsigned wantDate = ((2026 - 1980) << 9) | (11 << 5) | 1, wantTime = (10 << 11) | (48 << 5);
+    int allSame = 1;
+    for (size_t i = 0; i < g_ftimes.size(); i++) if (g_ftimes[i].first != wantDate || g_ftimes[i].second != wantTime) allSame = 0;
+    check("file date and time set for all 5 files, as listed by the host", g_ftimes.size() == 5 && allSame);
+  }
 
   for (int i = 0; i < Left.count; i++) if (strcmp(Left.items[i].name, "..")) Left.items[i].sel = 1;
   cmdDownload();   // files exist now: the overwrite question is answered with Y
@@ -58,7 +64,7 @@ int main() {
   ProgCancel = 1;
   u32 got = 0;
   ProgFileDone = 0; ProgDone = 0; ProgFileSize = 0;
-  int r = downloadFile("\\BIG.BIN", "/tmp/fakedl/CANCEL.BIN", &got);
+  int r = downloadFile("\\BIG.BIN", "/tmp/fakedl/CANCEL.BIN", &got, 0, 0);
   check("Esc: transfer reports cancel", r == FETCH_CANCEL);
   check("Esc: partial file removed", run("test ! -e /tmp/fakedl/CANCEL.BIN") == 0);
   ProgCancel = 0;
@@ -66,11 +72,11 @@ int main() {
   check("Esc: session still in sync (LIST works afterwards)", fetchRemoteList("\\SUB", &t) == 0 && t.count == 3);
 
   FH_BADCRC = 1; ProgFileDone = 0;
-  r = downloadFile("\\A.TXT", "/tmp/fakedl/BADCRC.TXT", &got);
+  r = downloadFile("\\A.TXT", "/tmp/fakedl/BADCRC.TXT", &got, 0, 0);
   check("wrong CRC is detected, file is kept", r == FETCH_BADCRC && run("test -e /tmp/fakedl/BADCRC.TXT") == 0);
   FH_BADCRC = 0;
 
-  r = downloadFile("\\NOPE.TXT", "/tmp/fakedl/NOPE.TXT", &got);
+  r = downloadFile("\\NOPE.TXT", "/tmp/fakedl/NOPE.TXT", &got, 0, 0);
   check("missing file: skipped, nothing left behind", r == FETCH_SKIP && run("test ! -e /tmp/fakedl/NOPE.TXT") == 0);
 
   printf("%d failure(s)\n", failures);
