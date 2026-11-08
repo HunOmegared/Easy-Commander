@@ -108,6 +108,7 @@ typedef unsigned long  u32;
 #define K_LEFT  0x14B
 #define K_RIGHT 0x14D
 #define K_ALTF1 0x168
+#define K_CTRL_O 0x0F      // Ctrl+O: look at the DOS screen
 #define K_ALTF2 0x169
 
 
@@ -150,6 +151,9 @@ static void saveSettings( void );
 static u16 __far *Vid;
 static u8  SavedMode;
 static u16 SavedCursor;
+static u16 SavedPos;                // cursor position of the DOS screen (DH row, DL column)
+static u16 *SavedScreen;            // the DOS screen as it was at the start (NULL: not kept)
+#define SCR_H       25
 
 static void putCh( int x, int y, u8 ch, u8 attr ) {
   Vid[ y * SCR_W + x ] = ((u16)attr << 8) | ch;
@@ -196,22 +200,40 @@ static void screenInit( void ) {
   r.h.ah = 0x0F;
   int86( 0x10, &r, &r );
   SavedMode = r.h.al & 0x7F;
+  u8 page = r.h.bh;
 
   r.h.ah = 0x03;
-  r.h.bh = 0;
+  r.h.bh = page;
   int86( 0x10, &r, &r );
   SavedCursor = r.x.cx;
+  SavedPos    = r.x.dx;
 
   if ( SavedMode == 7 ) {
     printf( "Easy Commander needs a colour display.\n" );
     exit( 1 );
   }
 
-  // 80x25 colour text; this also clears the screen.
-  r.x.ax = 0x0003;
-  int86( 0x10, &r, &r );
-
   Vid = (u16 __far *)MK_FP( 0xB800, 0 );
+
+  // Like Norton Commander: keep the DOS screen (the start text of the
+  // program, the commands before it) and give it back at the end.  This
+  // works for the normal 80x25 text mode only.
+  u8 rows = *(volatile u8 __far *)MK_FP( 0x40, 0x84 );     // 0 on old BIOS: 25 rows
+  if ( ((SavedMode == 2) || (SavedMode == 3)) && (page == 0) && ((rows == 0) || (rows == SCR_H - 1)) ) {
+    SavedScreen = (u16 *)malloc( SCR_W * SCR_H * 2 );
+  }
+
+  if ( SavedScreen ) {
+    for ( int i = 0; i < SCR_W * SCR_H; i++ ) {
+      SavedScreen[i] = Vid[i];
+      Vid[i] = 0x0720;                          // blank, grey on black
+    }
+  }
+  else {
+    // 80x25 colour text; this also clears the screen.
+    r.x.ax = 0x0003;
+    int86( 0x10, &r, &r );
+  }
 
   // Hide the hardware cursor.
   r.h.ah = 0x01;
@@ -219,19 +241,39 @@ static void screenInit( void ) {
   int86( 0x10, &r, &r );
 }
 
-static void screenDone( void ) {
+// Put the cursor back where the DOS screen had it.
+static void dosCursor( void ) {
 
   union REGS r;
-
-  r.h.ah = 0x00;
-  r.h.al = SavedMode;
-  int86( 0x10, &r, &r );
 
   r.h.ah = 0x01;
   r.x.cx = SavedCursor;
   int86( 0x10, &r, &r );
+
+  r.h.ah = 0x02;
+  r.h.bh = 0;
+  r.x.dx = SavedPos;
+  int86( 0x10, &r, &r );
 }
 
+static void screenDone( void ) {
+
+  union REGS r;
+
+  if ( SavedScreen ) {
+    for ( int i = 0; i < SCR_W * SCR_H; i++ ) Vid[i] = SavedScreen[i];
+    dosCursor( );
+  }
+  else {
+    r.h.ah = 0x00;
+    r.h.al = SavedMode;
+    int86( 0x10, &r, &r );
+
+    r.h.ah = 0x01;
+    r.x.cx = SavedCursor;
+    int86( 0x10, &r, &r );
+  }
+}
 
 // ---------------------------------------------------------------------
 // Keyboard and time
@@ -3286,7 +3328,7 @@ static unsigned freeMemKB( void ) {
 
 static void cmdHelp( void ) {
 
-  const char *lines[14];
+  const char *lines[15];
   char memLine[80];
 
   lines[0]  = "Up/Down/PgUp/PgDn/Home/End   move the cursor";
@@ -3302,11 +3344,29 @@ static void cmdHelp( void ) {
   lines[10] = "F3          view a file (F4 hex/text, F7 search, Esc close)";
   lines[11] = "F10 or Esc  quit";
   lines[12] = "Esc during a download cancels it.";
+  lines[13] = "Ctrl+O      look at the DOS screen (any key returns)";
 
   sprintf( memLine, "Free memory now: %u KB (compare with MEM before EC)", freeMemKB( ) );
-  lines[13] = memLine;
+  lines[14] = memLine;
 
-  uiDialog( "Easy Commander - help", lines, 14, 0 );
+  uiDialog( "Easy Commander - help", lines, 15, 0 );
+}
+
+// Ctrl+O: show the DOS screen (with the start text) until a key is pressed.
+static void cmdDosScreen( void ) {
+
+  if ( !SavedScreen ) return;
+
+  union REGS r;
+
+  for ( int i = 0; i < SCR_W * SCR_H; i++ ) Vid[i] = SavedScreen[i];
+  dosCursor( );
+
+  uiReadKey( );                    // the connection is kept alive meanwhile
+
+  r.h.ah = 0x01;                   // hide the cursor again; the caller redraws
+  r.x.cx = 0x2000;
+  int86( 0x10, &r, &r );
 }
 
 static void selectAll( Panel *p, int mode ) {   // 0 none, 1 all files, 2 invert files
@@ -3349,6 +3409,7 @@ static void handleKey( int k ) {
     case '*':    selectAll( p, 2 ); break;
 
     case K_F3:   cmdView( ); break;
+    case K_CTRL_O: cmdDosScreen( ); break;
     case K_F5:   cmdDownload( ); break;
     case K_F7:   cmdMakeDir( ); break;
     case K_F8:   cmdDelete( ); break;
@@ -3461,7 +3522,8 @@ static void endProgram( int rc ) {
 
 int main( int argc, char *argv[] ) {
 
-  fprintf( stderr, "Easy Commander (step 4) - built " __DATE__ "\n\n" );
+  printf( "Easy Commander 0.3.1, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
+  printf( "Free software, GPLv3 or later. Built " __DATE__ ".\n\n" );
 
   setIniPath( argv[0] );
   loadSettings( );

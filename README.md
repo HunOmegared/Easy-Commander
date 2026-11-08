@@ -81,6 +81,7 @@ documentation):
 | F2 | reconnect and refresh the host panel |
 | Alt+F1 | connect to another host |
 | Alt+F2 | change drive (right panel) |
+| Ctrl+O | look at the DOS screen (the start text and earlier commands); any key returns |
 | F10, Esc | quit |
 
 ## Repository layout
@@ -156,4 +157,4 @@ GPL-3.0-or-later. The DOS client links the mTCP library by Michael B. Brutman
 To keep things simple the whole project uses the same license. The mTCP source
 is **not** part of this repository; get it from <http://www.brutman.com/mTCP/>.
 
-Copyright (C) 2026 the Easy Commander contributors.
+Copyright (C) 2026 Daniel Szentmiklosi.
