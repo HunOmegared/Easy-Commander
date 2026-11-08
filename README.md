@@ -23,17 +23,22 @@ how to use.
 ## Status
 
 Early, but working. Tested in an emulated PC (86Box, MS-DOS 6.22, NE2000
-compatible network card) and on one real machine: AMD 5x86-133, 8 MB RAM,
-CompactFlash card instead of a hard disk, RTL8019AS ISA network card with the
-Realtek packet driver. Everything behaved the same as in the emulator.
-**Other hardware has not been tested yet.**
+compatible network card) and on two real machines, both with a CompactFlash card
+instead of a hard disk and an RTL8019AS ISA network card with the Realtek packet
+driver: an AMD 5x86-133 with 8 MB RAM, and a Cyrix 486DLC with 4 MB RAM (with an
+8 bit XT-IDE card and with a 16 bit IDE controller). Downloads, CRC32 checks,
+host search and switching between two hosts worked on all of them.
+**Older CPUs (286 and below) have not been tested yet.**
 
 * Browse the host's folders, select with Insert, download files and folders
   with their subfolders, keeping the structure.
 * Optional CRC32 check of every downloaded file (read back from disk). A faster
   CRC32 loop for slow CPUs is on by default (same result; F9 switches it off).
 * Cancel a download with Esc; existing files are never overwritten without asking.
-* Delete files and folders on the *local* side (F8). The host is always read-only.
+* **Download only, by design:** the host shares a folder read-only and the client
+  has no upload. Nothing on the host can be changed, renamed or deleted from the
+  DOS side, and the host only accepts connections from local network addresses.
+* Delete files and folders on the *local* side (F8).
 * Switch drives (Alt+F2) and host (Alt+F1).
 * Remembers the last host and the CRC option in `EC.INI` next to `EC.EXE`; started
   without arguments, `EC` connects to the saved host.
@@ -100,6 +105,20 @@ The speed is even over the whole file. Receiving and writing to the disk do
 not overlap, so their times add up; the disk side is the slower part on this
 machine. The test client's `/T` switch prints the speed of every megabyte.
 
+The same 12 MB file with Easy Commander (F5) on other setups:
+
+| Machine and disk | CRC32 check off | CRC32 check on |
+|---|---|---|
+| AMD 5x86-133, CF (InnoDisk) | 361 KB/s | 212 KB/s |
+| AMD 5x86-133, CF (SiliconSystems) | 394 KB/s | - |
+| Cyrix 486DLC, 8 bit XT-IDE card, CF | 105 KB/s | 51 KB/s |
+| Cyrix 486DLC, 16 bit IDE, CF | 425 KB/s | 225 KB/s (126 KB/s with the old CRC loop) |
+
+On the slow machines the disk is what limits the speed (a 486DLC with an 8 bit
+XT-IDE card writes only about 130 KB/s; its network-only speed is 651 KB/s), and
+the CRC32 check, which reads the file back, takes about as long as the
+download itself unless the fast CRC32 loop (F9) is used.
+
 ## Known issues
 
 * Build with **Open Watcom 1.9**. With the Open Watcom 2.0 beta (the V2
@@ -111,17 +130,17 @@ machine. The test client's `/T` switch prints the speed of every megabyte.
 * The client only sees DOS 8.3 names; the host maps long names to
   `BASE~1.EXT` style names. File dates are not restored (copies get the
   current date).
-* Download only; there is no upload.
 * The host search is a broadcast: it does not cross routers, and hosts started
   with another `-port` are not found by it (type their address instead). In the
-  86Box "SLIRP" network mode broadcasts do not reach the real network.
+  86Box "SLIRP" network mode the host is found but listed as 127.0.0.1; type
+  10.0.2.2 instead.
 * Memory use: while the program runs, F1 shows the free conventional memory;
   compare it with the value `MEM` reports before starting `EC`. An earlier build
   used about 286 KB; later builds use roughly 16 KB more (bigger write buffer).
 
 ## Roadmap
 
-* Test on more hardware (other network cards and packet drivers, a plain 486, less RAM).
+* Test on more hardware (other network cards and packet drivers, 286 and 386 machines, less RAM).
 * Select by mask (`+` with `*.TXT`), file viewer (F3), keep file dates.
 
 ## License
