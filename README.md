@@ -35,7 +35,8 @@ host search and switching between two hosts worked on all of them.
 * Optional CRC32 check of every downloaded file (read back from disk). A faster
   CRC32 loop for slow CPUs is on by default (same result; F9 switches it off).
 * View a file with F3, on the host or on the local disk: text or hex (F4), search
-  (F7), scrolling with the cursor keys. A file on the host is read in pieces,
+  (F7; in hex mode type hex bytes such as `6E 50`, or a text in double quotes),
+  scrolling with the cursor keys. A file on the host is read in pieces,
   so only what you look at is transferred.
 * Cancel a download with Esc; existing files are never overwritten without asking.
 * **Download only, by design:** the host shares a folder read-only and the client

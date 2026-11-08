@@ -252,9 +252,51 @@ int main( ) {
     viewOpen( remote, remote ? "\\EDGE.TXT" : path.c_str( ), (u32)d.size( ) );
     VSearch[0] = 0;
     viewKey( K_F4 );   // hex: the position is the row of the match
-    typeText( "needle" ); viewKey( K_F7 );
+    typeText( "\"needle\"" ); viewKey( K_F7 );      // hex mode: text goes in double quotes
     char msg[100]; sprintf( msg, "%s match across the block border (offset 8187)", remote ? "host " : "local" );
     check( msg, VFound == 1 && VNext == 8188 && VPos == (8187UL & ~15UL) );
+    viewClose( );
+  }
+
+  // ---- hex mode: search for bytes ----
+  for ( int remote = 0; remote < 2; remote++ ) {
+    const char *dir = remote ? "/tmp/fakehost" : "/tmp/fakeloc";
+    std::string path = std::string( dir ) + "/EDGE.TXT";
+    std::vector<unsigned char> d = readAll( path.c_str( ) );
+    const char *who = remote ? "host " : "local";
+    char msg[100];
+
+    viewOpen( remote, remote ? "\\EDGE.TXT" : path.c_str( ), (u32)d.size( ) );
+    VSearch[0] = 0;
+    viewKey( K_F4 );
+
+    typeText( "4E 45 45 44 4C 45" ); viewKey( K_F7 );
+    sprintf( msg, "%s hex search \"4E 45 45 44 4C 45\" finds the bytes at 8187", who );
+    check( msg, VFound == 1 && VNext == 8188 && VPos == 8176 );
+
+    VPos = 0; VFound = 0; VSearch[0] = 0;
+    typeText( "4e4545" ); viewKey( K_F7 );
+    sprintf( msg, "%s hex search without spaces, small letters", who );
+    check( msg, VFound == 1 && VNext == 8188 );
+
+    VPos = 0; VFound = 0; VSearch[0] = 0;
+    typeText( "45 62" ); viewKey( K_F7 );            // 'E' 'b' lies at 8192, after the search block border
+    sprintf( msg, "%s hex search 45 62 finds offset 8192", who );
+    check( msg, VFound == 1 && VNext == 8193 && VPos == 8192 );
+
+    VPos = 0; VFound = 0; VSearch[0] = 0;
+    typeText( "4E4" ); key( ' ' ); viewKey( K_F7 );    // odd number of digits: a message, no search
+    sprintf( msg, "%s odd number of hex digits is refused", who );
+    check( msg, VFound == 0 && VPos == 0 );
+
+    VSearch[0] = 0; typeText( "6E 7Z" ); key( ' ' ); viewKey( K_F7 );
+    sprintf( msg, "%s a letter that is not a hex digit is refused", who );
+    check( msg, VFound == 0 && VPos == 0 );
+
+    VSearch[0] = 0; typeText( "FF FF FF" ); key( ' ' ); viewKey( K_F7 );
+    sprintf( msg, "%s bytes that are not in the file: not found", who );
+    check( msg, VFound == 0 && VPos == 0 );
+
     viewClose( );
   }
 

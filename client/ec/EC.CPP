@@ -1988,16 +1988,16 @@ static int viewEscPressed( void ) {
   return 1;
 }
 
-// Looks for needle from offset from on.  Returns 1 (found, *at set), 0 (not
-// found), 2 (cancelled with Esc) or -1 (error, see ErrMsg).
-static int viewSearch( u32 from, const char *needle, u32 *at ) {
+// Looks for the nl bytes of needle from offset from on.  With icase the
+// letters A-Z match in both cases.  Returns 1 (found, *at set), 0 (not found),
+// 2 (cancelled with Esc) or -1 (error, see ErrMsg).
+static int viewSearch( u32 from, const u8 *needle, uint16_t nl, int icase, u32 *at ) {
 
-  char nd[40];
-  uint16_t nl = (uint16_t)strlen( needle );
+  u8 nd[40];
 
   if ( (nl == 0) || (nl > 38) ) return 0;
 
-  for ( uint16_t i = 0; i <= nl; i++ ) nd[i] = (char)toupper( (unsigned char)needle[i] );
+  for ( uint16_t i = 0; i < nl; i++ ) nd[i] = icase ? (u8)toupper( needle[i] ) : needle[i];
 
   u32 off = from;
 
@@ -2013,7 +2013,7 @@ static int viewSearch( u32 from, const char *needle, u32 *at ) {
 
     for ( int i = 0; (i + nl) <= n; i++ ) {
       uint16_t k = 0;
-      while ( (k < nl) && ((char)toupper( VSbuf[i + k] ) == nd[k]) ) k++;
+      while ( (k < nl) && ((icase ? (u8)toupper( VSbuf[i + k] ) : VSbuf[i + k]) == nd[k]) ) k++;
       if ( k == nl ) {
         *at = off + (u32)i;
         return 1;
@@ -2030,19 +2030,84 @@ static int viewSearch( u32 from, const char *needle, u32 *at ) {
   return 0;
 }
 
+// Turns what was typed into the bytes to look for.  In text mode that is the
+// text itself.  In hex mode it is hexadecimal bytes ("6E 50" or "6e50"), or a
+// text in double quotes ("needle").  Returns the length, or -1 if it makes no sense.
+static int viewParseNeedle( const char *in, int hexMode, u8 *out, int *icase ) {
+
+  int n = 0;
+  int len = (int)strlen( in );
+
+  *icase = 1;
+
+  if ( hexMode && (in[0] == '"') ) {
+    in++;
+    len--;
+    if ( (len > 0) && (in[len-1] == '"') ) len--;
+  }
+  else if ( hexMode ) {
+
+    int half = -1;
+
+    *icase = 0;
+
+    for ( int i = 0; i < len; i++ ) {
+
+      char c = in[i];
+      int v;
+
+      if ( c == ' ' ) {
+        if ( half >= 0 ) return -1;           // a space inside a byte
+        continue;
+      }
+
+      if ( (c >= '0') && (c <= '9') )      v = c - '0';
+      else if ( (c >= 'a') && (c <= 'f') ) v = c - 'a' + 10;
+      else if ( (c >= 'A') && (c <= 'F') ) v = c - 'A' + 10;
+      else return -1;
+
+      if ( half < 0 ) {
+        half = v;
+      }
+      else {
+        if ( n >= 38 ) return -1;
+        out[n++] = (u8)(half * 16 + v);
+        half = -1;
+      }
+    }
+
+    if ( half >= 0 ) return -1;               // odd number of digits
+    return n;
+  }
+
+  if ( len > 38 ) return -1;
+  memcpy( out, in, len );
+  return len;
+}
+
 static void viewFindText( void ) {
 
   char text[40];
+  u8 needle[40];
+  int icase;
+
   strcpy( text, VSearch );
 
-  if ( !inputBox( "Search", "Search for:", text, 38 ) ) return;
+  if ( !inputBox( "Search", VHex ? "Hex bytes (6E 50) or \"text\":" : "Search for:", text, 38 ) ) return;
+
+  int nl = viewParseNeedle( text, VHex, needle, &icase );
+
+  if ( nl <= 0 ) {
+    uiMessage( "Search", "Type hex bytes in pairs (6E 50)", "or a text in double quotes." );
+    return;
+  }
 
   u32 from = VPos;
   if ( VFound && (strcmp( text, VSearch ) == 0) ) from = VNext;
   strcpy( VSearch, text );
 
   u32 at = 0;
-  int rc = viewSearch( from, text, &at );
+  int rc = viewSearch( from, needle, (uint16_t)nl, icase, &at );
 
   if ( rc == 1 ) {
     VFound = 1;
