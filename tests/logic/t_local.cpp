@@ -72,6 +72,42 @@ int main(){
   // 7. host chooser (Enter keeps the proposed name and reconnects)
   g_keyval=13; Left.cur=2; cmdChooseHost();
   check("host chooser: reconnects and reloads the host root",Left.count==5&&!strcmp(HostName,"fake")&&Left.cur==0);
+  // 8. bottom line follows the Alt key (BIOS flag byte at 0040:0017)
+  {
+    auto bar=[&](){ static char row[81]; for(int x=0;x<80;x++) row[x]=(char)(fakeVid[24*80+x]&0xFF); row[80]=0; return std::string(row); };
+    g_scratch[0x17]=0;    drawKeyBar(); std::string a=bar();
+    g_scratch[0x17]=0x08; drawKeyBar(); std::string b=bar();
+    g_scratch[0x17]=0x04; drawKeyBar(); std::string c=bar();   // Ctrl only: still the normal labels
+    g_scratch[0x17]=0;    drawKeyBar(); std::string d=bar();
+    check("bottom line normally shows Delete and Quit",a.find("Delete")!=std::string::npos&&a.find("Quit")!=std::string::npos);
+    check("with Alt held it shows Host and Drive instead",b.find("Host")!=std::string::npos&&b.find("Drive")!=std::string::npos&&b.find("Delete")==std::string::npos);
+    check("Ctrl alone does not change the bottom line",c==a);
+    check("after releasing Alt the normal labels are back",d==a);
+  }
+
+  // 9. settings (EC.INI)
+  {
+    setIniPath("C:\\EC\\EC.EXE"); check("INI path next to the program",!strcmp(IniPath,"C:\\EC\\EC.INI"));
+    setIniPath("EC.EXE");          check("INI path without a folder",!strcmp(IniPath,"EC.INI"));
+    setIniPath("C:EC.EXE");        check("INI path with a drive only",!strcmp(IniPath,"C:EC.INI"));
+
+    strcpy(IniPath,"/tmp/ec_test.ini");
+    strcpy(HostName,"192.168.50.54"); ServerPort=7000; Verify=1;
+    saveSettings();
+    SavedHost[0]=0; SavedPort=6502; Verify=0;
+    loadSettings();
+    check("settings survive a save and load",!strcmp(SavedHost,"192.168.50.54")&&SavedPort==7000&&Verify==1);
+
+    system("printf 'host=pc\\r\\nport=99999\\nverify=0\\njunk\\n' > /tmp/ec_test.ini");
+    SavedHost[0]=0; SavedPort=6502; Verify=1;
+    loadSettings();
+    check("bad port and unknown lines are ignored, CR LF is fine",!strcmp(SavedHost,"pc")&&SavedPort==6502&&Verify==0);
+
+    strcpy(IniPath,"/tmp/does-not-exist/EC.INI"); SavedHost[0]=0;
+    loadSettings(); saveSettings();   // neither may fail or crash
+    check("missing or unwritable INI file is harmless",SavedHost[0]==0);
+  }
+
   printf("%d failure(s)\n",failures);
   return failures;
 }

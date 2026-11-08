@@ -6,7 +6,8 @@ against a **fake Easy Commander host** (`stubs/tcpsockm.h`).
 
 What is covered: folder listing, recursive download with blocks, overwrite
 handling, cancelling, CRC32 checks, deleting (read-only and hidden files, a file
-that cannot be deleted), the drive chooser and switching the host.
+that cannot be deleted), the drive chooser, switching the host, the settings file and the
+host search (UDP broadcast, with answers from several fake hosts).
 
 What is **not** covered: video memory, the keyboard, the packet driver, real
 disk behaviour, timing and the real mTCP library. Always test on real DOS too.

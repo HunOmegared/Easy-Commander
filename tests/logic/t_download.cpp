@@ -29,6 +29,7 @@ int main() {
   TmpItems = (Item *)malloc(MAX_ITEMS * sizeof(Item));
   TreeBuf = (uint8_t *)malloc(TREE_BUF_SIZE);
   CrcBuf = (uint8_t *)malloc(4096);
+  DiskBuf = (char *)malloc(DISK_BUF_SIZE);
   initCrcTable();
   Vid = fakeVid;
   Sock = TcpSocketMgr::getSocket();

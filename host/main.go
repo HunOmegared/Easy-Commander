@@ -12,6 +12,9 @@
 //	                    listed before their contents; empty folders included
 //	CRC <path>       -> OK <size> <crc32 as 8 hex digits>   (files only)
 //	QUIT             -> OK Bye
+//
+// Discovery (UDP, same port number): "ECDISC 1" is answered with
+// "ECHOST 1 <tcp port> <name>".
 //	errors           -> ERR <code> <message>
 //
 // The client only ever sees DOS 8.3 names. The host maps long names to
@@ -552,13 +555,66 @@ func (s *server) handle(conn net.Conn) {
 	}
 }
 
+// allowedIP accepts only private (local network), loopback and link-local
+// addresses.
+func allowedIP(ip net.IP) bool {
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+}
+
 func allowedRemote(addr net.Addr) bool {
 	ta, ok := addr.(*net.TCPAddr)
 	if !ok {
 		return false
 	}
-	ip := ta.IP
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+	return allowedIP(ta.IP)
+}
+
+// ---------------------------------------------------------------------
+// Discovery: a client asks "who is there?" with a UDP broadcast and every
+// host answers the sender directly. A host never announces itself.
+
+const discoveryRequest = "ECDISC 1"
+
+// sanitizeName makes a name that is safe to show on a DOS screen: printable
+// ASCII only, at most 24 characters.
+func sanitizeName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r >= 0x20 && r < 0x7F {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('?')
+		}
+		if b.Len() >= 24 {
+			break
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		out = "easycommander"
+	}
+	return out
+}
+
+// serveDiscovery answers discovery requests until pc is closed.
+func serveDiscovery(pc net.PacketConn, tcpPort int, name string) {
+	reply := []byte(fmt.Sprintf("ECHOST 1 %d %s\r\n", tcpPort, name))
+	buf := make([]byte, 512)
+	for {
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		ua, ok := addr.(*net.UDPAddr)
+		if !ok || !allowedIP(ua.IP) {
+			continue
+		}
+		if strings.TrimSpace(string(buf[:n])) != discoveryRequest {
+			continue
+		}
+		log.Printf("%s asked who is here", addr)
+		pc.WriteTo(reply, addr)
+	}
 }
 
 func localIPs() []string {
@@ -583,7 +639,8 @@ func fatal(format string, args ...any) {
 
 func main() {
 	dirFlag := flag.String("dir", "", "folder to share (or give it as the first argument / drop it on the program)")
-	port := flag.Int("port", 6502, "TCP port to listen on")
+	port := flag.Int("port", 6502, "TCP port to listen on (and UDP port for host searches)")
+	name := flag.String("name", "", "name shown to clients that search for hosts (default: the computer name)")
 	flag.Parse()
 
 	dir := *dirFlag
@@ -623,6 +680,19 @@ func main() {
 		}
 	}
 	fmt.Println("Only local network (private) addresses are accepted. Ctrl+C to stop.")
+
+	hostLabel := *name
+	if hostLabel == "" {
+		hostLabel, _ = os.Hostname()
+	}
+	hostLabel = sanitizeName(hostLabel)
+
+	if pc, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", *port)); err != nil {
+		fmt.Printf("Host search is off (UDP port %d: %v)\n", *port, err)
+	} else {
+		fmt.Printf("Answering host searches on UDP port %d as %q\n", *port, hostLabel)
+		go serveDiscovery(pc, *port, hostLabel)
+	}
 	fmt.Println()
 
 	srv := &server{root: abs}

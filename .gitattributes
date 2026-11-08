@@ -6,3 +6,4 @@ go.mod    text eol=lf
 *.sh      text eol=lf
 *.CPP     text eol=crlf
 MAKEFILE  text eol=crlf
+*.CFG     text eol=crlf

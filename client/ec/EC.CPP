@@ -138,6 +138,7 @@ static int   Running = 1;
 static void uiMessage( const char *title, const char *l1, const char *l2 );
 static void pump( void );
 static void selectAll( Panel *p, int mode );
+static void saveSettings( void );
 
 
 // ---------------------------------------------------------------------
@@ -1614,7 +1615,10 @@ static void cmdOptions( void ) {
 
     int k = uiReadKey( );
 
-    if ( (k == 'v') || (k == 'V') || (k == ' ') ) Verify = !Verify;
+    if ( (k == 'v') || (k == 'V') || (k == ' ') ) {
+      Verify = !Verify;
+      saveSettings( );
+    }
     if ( (k == 13) || (k == 27) ) break;
   }
 }
@@ -2151,6 +2155,208 @@ static void cmdDrive( void ) {
 // ---------------------------------------------------------------------
 // Choosing another host (Alt+F1)
 
+// ---------------------------------------------------------------------
+// Finding hosts on the local network.
+//
+// The client sends a UDP broadcast "ECDISC 1"; every host answers the sender
+// with "ECHOST 1 <tcp port> <name>".  The packet handling follows mTCP's
+// DHCP client: a packet structure that starts with the Ethernet/IP/UDP
+// headers is sent to IpBroadcastNonRoutable, and the receive handler gets the
+// whole packet and must hand it back with Buffer_free.
+
+#define DISCOVERY_PORT  6502          // UDP port the hosts listen on
+#define MAX_FOUND       8
+
+typedef struct {
+  IpAddr_t ip;
+  uint16_t port;
+  char     name[28];
+} FoundHost;
+
+typedef struct {
+  UdpPacket_t hdr;
+  uint8_t     data[16];
+} DiscoverPacket_t;
+
+static FoundHost Found[MAX_FOUND];
+static int       FoundCount = 0;
+
+// Handles the text of one answer.  Anything that is not a valid answer is ignored.
+static void parseHostReply( char *text, const uint8_t *ipSrc ) {
+
+  if ( strncmp( text, "ECHOST 1 ", 9 ) != 0 ) return;
+
+  char *endp;
+  unsigned long port = strtoul( text + 9, &endp, 10 );
+
+  if ( (port == 0) || (port > 65535UL) || (*endp != ' ') ) return;
+
+  char *name = endp + 1;
+
+  for ( char *q = name; *q; q++ ) {
+    if ( (*q == '\r') || (*q == '\n') ) { *q = 0; break; }
+  }
+
+  int i;
+
+  // The search is sent several times, so the same host answers several times.
+  for ( i = 0; i < FoundCount; i++ ) {
+    if ( (memcmp( Found[i].ip, ipSrc, 4 ) == 0) && (Found[i].port == (uint16_t)port) ) return;
+  }
+
+  if ( FoundCount >= MAX_FOUND ) return;
+
+  FoundHost *h = &Found[FoundCount++];
+
+  memcpy( h->ip, ipSrc, 4 );
+  h->port = (uint16_t)port;
+
+  strncpy( h->name, name, sizeof( h->name ) - 1 );
+  h->name[sizeof( h->name ) - 1] = 0;
+
+  // Only printable characters go on the screen.
+  for ( i = 0; h->name[i]; i++ ) {
+    if ( ((u8)h->name[i] < 32) || ((u8)h->name[i] > 126) ) h->name[i] = '?';
+  }
+}
+
+// All UDP packets for our port come through here.
+static void discoveryHandler( const unsigned char *packet, const UdpHeader *udp ) {
+
+  const IpHeader *ip = (const IpHeader *)(packet + sizeof( EthHeader ));
+  uint16_t len = ntohs( udp->len );
+
+  if ( len > 8 ) {
+
+    char text[100];
+
+    len -= 8;                                   // the UDP header itself
+    if ( len > (sizeof( text ) - 1) ) len = sizeof( text ) - 1;
+
+    memcpy( text, ((const unsigned char *)udp) + 8, len );
+    text[len] = 0;
+
+    parseHostReply( text, ip->ip_src );
+  }
+
+  // Always give the packet back, whatever it was.
+  Buffer_free( packet );
+}
+
+// Sends the search three times and collects the answers for about two
+// seconds.  Esc stops waiting.  Returns the number of hosts in Found[],
+// or -1 if UDP could not be used.
+static int findHosts( void ) {
+
+  DiscoverPacket_t pkt;
+
+  FoundCount = 0;
+  CtrlBreakDetected = 0;
+
+  uint16_t port = Udp::getUnusedCallbackPort( );
+  if ( port == 0 ) port = 6503;
+
+  if ( Udp::registerCallback( port, &discoveryHandler ) ) {
+    ErrMsg = "UDP is not available";
+    return -1;
+  }
+
+  memcpy( pkt.data, "ECDISC 1\r\n", 10 );
+
+  int stop = 0;
+
+  for ( int attempt = 0; (attempt < 3) && !stop; attempt++ ) {
+
+    if ( Udp::sendUdp( IpBroadcastNonRoutable, port, DISCOVERY_PORT, 10, (unsigned char *)&pkt, 1 ) < 0 ) {
+      ErrMsg = "could not send the search";
+      break;
+    }
+
+    clockTicks_t start = TIMER_GET_CURRENT( );
+
+    while ( Timer_diff( start, TIMER_GET_CURRENT( ) ) < TIMER_MS_TO_TICKS( 700 ) ) {
+
+      Utils::processPackets( );
+
+      if ( CtrlBreakDetected ) { stop = 1; break; }
+
+      if ( kbhit( ) ) {
+        int k = getch( );
+        if ( (k == 0) || (k == 0xE0) ) getch( );     // an extended key: skip its second code
+        else if ( k == 27 )            { stop = 1; break; }
+      }
+    }
+  }
+
+  Udp::unregisterCallback( port );
+
+  return FoundCount;
+}
+
+// Makes Found[i] the host to connect to.
+static void applyFound( const FoundHost *h ) {
+  memcpy( ServerAddr, h->ip, 4 );
+  ServerPort = h->port;
+  sprintf( HostName, "%d.%d.%d.%d", h->ip[0], h->ip[1], h->ip[2], h->ip[3] );
+}
+
+// At program start, before the screen is switched: no host was given and
+// none is saved.  Returns 1 if a host was found and chosen (name, address and
+// port are set), 0 if the user typed an address (to be resolved), -1 if
+// nothing was entered.
+static int searchAtStart( void ) {
+
+  printf( "Looking for hosts on the network (Esc skips) ...\n" );
+
+  int n = findHosts( );
+  int i;
+
+  if ( n == 1 ) {
+    printf( "Found: %s  %d.%d.%d.%d\n", Found[0].name,
+            Found[0].ip[0], Found[0].ip[1], Found[0].ip[2], Found[0].ip[3] );
+    applyFound( &Found[0] );
+    return 1;
+  }
+
+  if ( n > 1 ) {
+
+    printf( "\n" );
+    for ( i = 0; i < n; i++ ) {
+      printf( "  %d  %-24s %d.%d.%d.%d\n", i + 1, Found[i].name,
+              Found[i].ip[0], Found[i].ip[1], Found[i].ip[2], Found[i].ip[3] );
+    }
+
+    while ( 1 ) {
+
+      char line[20];
+
+      printf( "\nNumber of the host (1-%d, or just Enter to type an address): ", n );
+      if ( fgets( line, sizeof( line ), stdin ) == NULL ) return -1;
+
+      if ( (line[0] == '\n') || (line[0] == '\r') || (line[0] == 0) ) break;
+
+      int pick = atoi( line );
+      if ( (pick >= 1) && (pick <= n) ) {
+        applyFound( &Found[pick - 1] );
+        return 1;
+      }
+    }
+  }
+  else {
+    printf( "No host answered.\n" );
+  }
+
+  printf( "Address of the host (for example 192.168.1.10): " );
+  if ( fgets( HostName, sizeof( HostName ), stdin ) == NULL ) return -1;
+
+  int l = (int)strlen( HostName );
+  while ( (l > 0) && ((HostName[l-1] == '\n') || (HostName[l-1] == '\r') || (HostName[l-1] == ' ')) ) {
+    HostName[--l] = 0;
+  }
+
+  return (l == 0) ? -1 : 0;
+}
+
 static int resolveHost( const char *name, uint8_t *addrOut ) {
 
   IpAddr_t addr;
@@ -2174,8 +2380,113 @@ static int resolveHost( const char *name, uint8_t *addrOut ) {
   return 1;
 }
 
+// Switches the left panel to another host.  If it cannot be read, everything
+// stays as it was.
+static void switchToHost( const char *name, const uint8_t *addr, uint16_t port ) {
+
+  IpAddr_t oldAddr;
+  memcpy( oldAddr, ServerAddr, 4 );
+  uint16_t oldPort = ServerPort;
+  char oldName[80];
+  char oldPath[80];
+  strcpy( oldName, HostName );
+  strcpy( oldPath, Left.path );
+
+  memcpy( ServerAddr, addr, 4 );
+  ServerPort = port;
+  strcpy( HostName, name );
+  strcpy( Left.path, "\\" );
+  Connected = 0;
+
+  if ( !reload( &Left ) ) {
+    memcpy( ServerAddr, oldAddr, 4 );
+    ServerPort = oldPort;
+    strcpy( HostName, oldName );
+    strcpy( Left.path, oldPath );
+    Connected = 0;                        // the old host is reached again on the next action
+    return;
+  }
+
+  Left.cur = 0;
+  Left.top = 0;
+  fixView( &Left );
+  Active = 0;
+
+  saveSettings( );
+}
+
+// Shows the hosts that answered and lets the user pick one.  Returns the
+// index in Found[], n for "type an address", or -1 for Esc.
+static int chooseFound( int n ) {
+
+  int sel = 0;
+  int w = 56;
+  int h = n + 6;
+  int x = (SCR_W - w) / 2;
+  int y = (25 - h) / 2;
+  const char *hint = "Up/Down + Enter, Esc = cancel";
+
+  while ( 1 ) {
+
+    dialogFrame( x, y, w, h, "Hosts found" );
+
+    for ( int i = 0; i <= n; i++ ) {
+
+      char line[70];
+
+      if ( i < n ) {
+        sprintf( line, " %-24.24s  %d.%d.%d.%d", Found[i].name,
+                 Found[i].ip[0], Found[i].ip[1], Found[i].ip[2], Found[i].ip[3] );
+      }
+      else {
+        strcpy( line, " (type an address ...)" );
+      }
+
+      putStrPad( x + 3, y + 2 + i, line, w - 6, (i == sel) ? A_CURSOR : A_DLG );
+    }
+
+    putStr( x + (w - (int)strlen( hint )) / 2, y + 4 + n, hint, A_DLGHINT );
+
+    int k = uiReadKey( );
+
+    if ( k == K_UP )   sel = (sel + n) % (n + 1);
+    if ( k == K_DOWN ) sel = (sel + 1) % (n + 1);
+    if ( k == 13 )     return sel;
+    if ( k == 27 )     return -1;
+  }
+}
+
 static void cmdChooseHost( void ) {
 
+  // First look for hosts on the network.
+  {
+    int w = 44, h = 5;
+    int x = (SCR_W - w) / 2;
+    int y = (25 - h) / 2;
+    dialogFrame( x, y, w, h, "Searching" );
+    putStrPad( x + 3, y + 2, "Looking for hosts ... (Esc stops)", w - 6, A_DLG );
+  }
+
+  int n = findHosts( );
+
+  if ( n > 0 ) {
+
+    int pick = chooseFound( n );
+
+    if ( pick < 0 ) return;
+
+    if ( pick < n ) {
+      char name[20];
+      sprintf( name, "%d.%d.%d.%d", Found[pick].ip[0], Found[pick].ip[1], Found[pick].ip[2], Found[pick].ip[3] );
+      switchToHost( name, Found[pick].ip, Found[pick].port );
+      return;
+    }
+  }
+  else {
+    uiMessage( "Hosts", (n < 0) ? "The search could not be sent." : "No host answered.", "You can type an address instead." );
+  }
+
+  // Nothing found (or the user wants to type): ask for an address.
   char buf[60];
 
   strncpy( buf, HostName, 36 );
@@ -2210,34 +2521,7 @@ static void cmdChooseHost( void ) {
     return;
   }
 
-  // Remember the old state so that a failure leaves everything as it was.
-  IpAddr_t oldAddr;
-  memcpy( oldAddr, ServerAddr, 4 );
-  uint16_t oldPort = ServerPort;
-  char oldName[80];
-  char oldPath[80];
-  strcpy( oldName, HostName );
-  strcpy( oldPath, Left.path );
-
-  memcpy( ServerAddr, addr, 4 );
-  ServerPort = port;
-  strcpy( HostName, buf );
-  strcpy( Left.path, "\\" );
-  Connected = 0;
-
-  if ( !reload( &Left ) ) {
-    memcpy( ServerAddr, oldAddr, 4 );
-    ServerPort = oldPort;
-    strcpy( HostName, oldName );
-    strcpy( Left.path, oldPath );
-    Connected = 0;                        // the old host is reached again on the next action
-    return;
-  }
-
-  Left.cur = 0;
-  Left.top = 0;
-  fixView( &Left );
-  Active = 0;
+  switchToHost( buf, addr, port );
 }
 
 static void cmdMakeDir( void ) {
@@ -2313,7 +2597,7 @@ static void cmdHelp( void ) {
   lines[6]  = "F7          make a folder (right panel)";
   lines[7]  = "F8          delete (right panel only, asks first)";
   lines[8]  = "F9          options (CRC32 check of every download)";
-  lines[9]  = "F2 reconnect   Alt+F1 other host   Alt+F2 drive";
+  lines[9]  = "F2 reconnect   Alt+F1 find/choose host   Alt+F2 drive";
   lines[10] = "F10 or Esc  quit";
   lines[11] = "Esc during a download cancels it.";
 
@@ -2392,6 +2676,76 @@ static void handleKey( int k ) {
 
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Settings: the last host and the CRC option are remembered in EC.INI,
+// in the folder of EC.EXE.  Problems with the file are ignored: the program
+// simply works without it.
+
+static char     IniPath[100];
+static char     SavedHost[40];
+static uint16_t SavedPort = 6502;
+static int      UsedSavedHost = 0;
+static int      NeedSearch = 0;
+
+static void setIniPath( const char *argv0 ) {
+
+  strncpy( IniPath, argv0, 80 );
+  IniPath[80] = 0;
+
+  // Keep everything up to the last '\\' or ':' (the folder of the program).
+  int cut = -1;
+  for ( int i = 0; IniPath[i]; i++ ) {
+    if ( (IniPath[i] == '\\') || (IniPath[i] == ':') ) cut = i;
+  }
+
+  if ( cut >= 0 ) IniPath[cut + 1] = 0;
+  else            IniPath[0] = 0;
+
+  strcat( IniPath, "EC.INI" );
+}
+
+static void loadSettings( void ) {
+
+  FILE *f = fopen( IniPath, "r" );
+  if ( f == NULL ) return;
+
+  char line[100];
+
+  while ( fgets( line, sizeof( line ), f ) ) {
+
+    int l = (int)strlen( line );
+    while ( (l > 0) && ((line[l-1] == '\n') || (line[l-1] == '\r') || (line[l-1] == ' ')) ) {
+      line[--l] = 0;
+    }
+
+    if ( strncmp( line, "host=", 5 ) == 0 ) {
+      strncpy( SavedHost, line + 5, sizeof( SavedHost ) - 1 );
+      SavedHost[sizeof( SavedHost ) - 1] = 0;
+    }
+    else if ( strncmp( line, "port=", 5 ) == 0 ) {
+      unsigned long p = strtoul( line + 5, NULL, 10 );
+      if ( (p > 0) && (p < 65536UL) ) SavedPort = (uint16_t)p;
+    }
+    else if ( strncmp( line, "verify=", 7 ) == 0 ) {
+      Verify = (line[7] == '1');
+    }
+  }
+
+  fclose( f );
+}
+
+static void saveSettings( void ) {
+
+  FILE *f = fopen( IniPath, "w" );
+  if ( f == NULL ) return;
+
+  fprintf( f, "host=%s\n", HostName );
+  fprintf( f, "port=%u\n", (unsigned)ServerPort );
+  fprintf( f, "verify=%d\n", Verify ? 1 : 0 );
+
+  fclose( f );
+}
+
 static void endProgram( int rc ) {
   Utils::endStack( );
   Utils::dumpStats( stderr );
@@ -2402,6 +2756,9 @@ int main( int argc, char *argv[] ) {
 
   fprintf( stderr, "Easy Commander (step 4) - built " __DATE__ "\n\n" );
 
+  setIniPath( argv[0] );
+  loadSettings( );
+
   if ( argc > 1 ) {
     if ( strlen( argv[1] ) >= sizeof( HostName ) ) {
       fprintf( stderr, "Host name too long\n" );
@@ -2409,15 +2766,14 @@ int main( int argc, char *argv[] ) {
     }
     strcpy( HostName, argv[1] );
   }
+  else if ( SavedHost[0] ) {
+    strcpy( HostName, SavedHost );
+    ServerPort = SavedPort;
+    UsedSavedHost = 1;
+    printf( "Using the saved host %s (to use another one: EC <host>)\n", HostName );
+  }
   else {
-    printf( "Address of the host (for example 192.168.1.10): " );
-    if ( fgets( HostName, sizeof( HostName ), stdin ) == NULL ) return 1;
-
-    int l = (int)strlen( HostName );
-    while ( (l > 0) && ((HostName[l-1] == '\n') || (HostName[l-1] == '\r') || (HostName[l-1] == ' ')) ) {
-      HostName[--l] = 0;
-    }
-    if ( l == 0 ) return 1;
+    NeedSearch = 1;            // no host given and none saved: look for one once TCP/IP runs
   }
 
   if ( argc > 2 ) {
@@ -2457,11 +2813,23 @@ int main( int argc, char *argv[] ) {
 
   // From here on leave through endProgram( ).
 
-  printf( "Resolving %s - press Ctrl-Break to abort\n", HostName );
+  int addressKnown = 0;
 
-  if ( !resolveHost( HostName, ServerAddr ) ) {
-    fprintf( stderr, "Error resolving host\n" );
-    endProgram( 3 );
+  if ( NeedSearch ) {
+    int r = searchAtStart( );
+    if ( r < 0 ) endProgram( 1 );
+    addressKnown = r;          // 1: the search already gave the address
+  }
+
+  if ( !addressKnown ) {
+
+    printf( "Resolving %s - press Ctrl-Break to abort\n", HostName );
+
+    if ( !resolveHost( HostName, ServerAddr ) ) {
+      fprintf( stderr, "Error resolving host\n" );
+      if ( UsedSavedHost ) fprintf( stderr, "That was the saved host. Try: EC <host>\n" );
+      endProgram( 3 );
+    }
   }
 
   printf( "Connecting to %d.%d.%d.%d port %u\n",
@@ -2469,6 +2837,7 @@ int main( int argc, char *argv[] ) {
 
   if ( !connectHost( ) ) {
     fprintf( stderr, "Could not connect: %s\n", ErrMsg );
+    if ( UsedSavedHost ) fprintf( stderr, "That was the saved host. Try: EC <host>\n" );
     endProgram( 3 );
   }
 
@@ -2479,6 +2848,8 @@ int main( int argc, char *argv[] ) {
     fprintf( stderr, "Cannot read the host's folder: %s\n", ErrMsg );
     endProgram( 3 );
   }
+
+  saveSettings( );              // the connection works: remember this host
 
   Right.remote = 0;
   if ( getcwd( Right.path, 79 ) == NULL ) strcpy( Right.path, "C:\\" );

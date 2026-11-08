@@ -59,6 +59,23 @@ CRC-32 (IEEE 802.3, the one used by zip) of the whole file.
 
 The host then closes the connection.
 
+## Discovery (UDP)
+
+A client that does not know the host's address sends one UDP datagram with the
+text `ECDISC 1` (optionally followed by CR LF) to the broadcast address, on the
+same port number as the TCP port (default 6502). Every host answers directly to
+the sender:
+
+    ECHOST 1 <tcp port> <name>
+
+`<name>` is printable ASCII, at most 24 characters (the computer name, or the
+`-name` option of the host). The client takes the host's address from the
+sender of the reply. A host never announces itself; it only answers requests
+from private, loopback and link-local addresses and ignores everything else.
+Broadcasts do not cross routers. The DOS client sends its search to UDP port
+6502 only, so a host that was started with another `-port` has to be addressed
+by hand.
+
 ## Errors
 
     ERR <code> <message>

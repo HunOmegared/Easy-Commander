@@ -20,17 +20,22 @@ From a Windows `cmd` window:
 
 Run it with the folder to share (or drop the folder onto the executable).
 Without an argument it shares a folder named `share` in the folder where it was
-started. Options: `-dir <folder>`, `-port <number>` (default 6502).
+started. Options: `-dir <folder>`, `-port <number>` (default 6502, TCP and UDP) and
+`-name <text>` (the name shown to clients that search for hosts; default: the
+computer name).
 
-## DOS client (Open Watcom 2.0 + mTCP source)
+## DOS client (Open Watcom 1.9 + mTCP source)
 
-Used so far: Open Watcom 2.0 (beta, October 2026 build) and the mTCP source from
+Use **Open Watcom 1.9** (recommended; it is what the mTCP author uses). The Open
+Watcom 2.0 beta (V2 fork) also compiles the code, but the program then prints
+`End: heap is corrupted!` at exit. Install 1.9 in its own folder (for example
+`C:\WATCOM19`), and check that `wmake -?` reports version 1.9. The mTCP source is from
 <http://www.brutman.com/mTCP/> (download the *source* archive, not only the
 binaries). The paths below assume mTCP is in `C:\mtcp`, with no spaces in the path.
 
 1. Install Open Watcom, open a `cmd` window and set up the environment:
 
-       C:\WATCOM\owsetenv.bat
+       C:\WATCOM19\owsetenv.bat
 
 2. Create the application folder next to the other apps and copy the sources
    (run this from the root of this repository):
@@ -38,9 +43,12 @@ binaries). The paths below assume mTCP is in `C:\mtcp`, with no spaces in the pa
        mkdir C:\mtcp\src\APPS\EC
        copy client\ec\EC.CPP      C:\mtcp\src\APPS\EC
        copy client\ec\MAKEFILE    C:\mtcp\src\APPS\EC
-       copy C:\mtcp\src\APPS\NC\NC.CFG  C:\mtcp\src\APPS\EC\EC.CFG
+       copy client\ec\EC.CFG      C:\mtcp\src\APPS\EC
 
-   `EC.CFG` is the configuration header of mTCP Netcat, copied unchanged.
+   `EC.CFG` is a modified copy of the configuration header of mTCP Netcat. The
+   only change is `UDP_MAX_CALLBACKS`, raised from 1 to 2: the DNS code uses the
+   only callback the default allows, and the host search needs one more. (The
+   change is marked in the file's header.) It includes mTCP's own `Global.Cfg`.
 
 3. Build:
 

@@ -7,7 +7,7 @@
 #include <string>
 #define __far
 static unsigned char g_scratch[65536];
-#define MK_FP(s,o) ((void*)g_scratch)
+#define MK_FP(s,o) ((void*)(g_scratch + (o)))
 union REGS { struct { unsigned short ax,bx,cx,dx,si,di,cflag; } x; struct { unsigned char al,ah,bl,bh,cl,ch,dl,dh; } h; };
 static inline int int86(int,union REGS*,union REGS*){return 0;}
 #define _A_NORMAL 0x00

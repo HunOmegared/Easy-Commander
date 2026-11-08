@@ -11,8 +11,8 @@
 struct TcpBuffer { uint16_t len; void setDataLen(uint16_t n){ len=n; } static TcpBuffer *getXmitBuf(){ return (TcpBuffer*)calloc(1,sizeof(TcpBuffer)+1500); } };
 struct EthHeader{ uint8_t b[14]; };
 struct TcpHeader{ uint8_t hlen; uint8_t rest[19]; int getTcpHlen(){return hlen;} };
-struct IpHeader{ uint16_t plen; uint8_t rest[18]; void *payloadPtr(){return (uint8_t*)this+20;} uint16_t payloadLen(){return plen;} };
-inline void Buffer_free(void *p){ free(p); }
+struct IpHeader{ uint16_t plen; uint8_t pad[10]; uint8_t ip_src[4]; uint8_t ip_dest[4]; void *payloadPtr(){return (uint8_t*)this+20;} uint16_t payloadLen(){return plen;} };
+inline void Buffer_free(const void *p){ free((void*)p); }
 
 static std::string FH_ROOT="/tmp/fakehost";
 static int FH_BADCRC=0;
