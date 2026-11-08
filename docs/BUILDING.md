@@ -4,25 +4,33 @@
 
     cd host
     go test
-    go build -o easycommander-host.exe        (Windows)
-    go build -o easycommander-host            (Linux)
+    go build -ldflags "-H=windowsgui -s -w" -o echost.exe        (Windows)
+    go build -o echost                                          (Linux)
+
+`host\build-windows.bat` runs the two Windows commands. `-H=windowsgui` makes a
+program without a console window; the window version needs nothing but Go (no
+extra packages). Without that flag it works too, but a console window is left
+open next to the program window.
 
 Cross compiling from a Linux shell:
 
-    GOOS=windows GOARCH=amd64 go build -o easycommander-host.exe
-    GOOS=linux   GOARCH=amd64 go build -o easycommander-host
+    GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui -s -w" -o echost.exe
+    GOOS=linux   GOARCH=amd64 go build -o echost
 
 From a Windows `cmd` window:
 
     set GOOS=linux
     set GOARCH=amd64
-    go build -o easycommander-host
+    go build -o echost
 
-Run it with the folder to share (or drop the folder onto the executable).
-Without an argument it shares a folder named `share` in the folder where it was
-started. Options: `-dir <folder>`, `-port <number>` (default 6502, TCP and UDP) and
+On Windows the program opens a window (see the README); on Linux it runs in the
+console. In the console it shares the folder given as the argument (or dropped
+onto the executable), or a folder named `share` in the folder where it was
+started. Options: `-dir <folder>`, `-port <number>` (default 6502, TCP and UDP),
 `-name <text>` (the name shown to clients that search for hosts; default: the
-computer name).
+computer name) and, on Windows, `-console` (no window; output goes to the
+console the program was started from). In the window version the same options
+override the saved settings (`echost.ini` next to the program).
 
 ## DOS client (Open Watcom 1.9 + mTCP source)
 

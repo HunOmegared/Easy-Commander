@@ -50,11 +50,21 @@ host search and switching between two hosts worked on all of them.
 
 **Host (modern PC)** - see [docs/BUILDING.md](docs/BUILDING.md):
 
-    easycommander-host.exe C:\path\to\shared\folder
+    echost.exe
 
-It prints the addresses it can be reached at and listens on TCP port 6502.
-Only connections from private (local network) addresses are accepted.
-The first start on Windows asks whether the firewall may allow it.
+On Windows it opens a small window: the shared folder (Browse...), the name
+shown to DOS clients, the port, a Start/Stop button, the address to type into
+the DOS client and a list of what the clients do. Sharing starts at once. When
+the window is closed the host keeps running in the notification area (tray); a
+right click on its icon has Open, Start/Stop and Exit. The settings are kept in
+`echost.ini` next to the program. `echost.exe -console` runs it
+without a window, and on Linux it always runs in the console:
+
+    echost C:\path\to\shared\folder
+
+The host listens on TCP port 6502 (and UDP 6502 for host searches). Only
+connections from private (local network) addresses are accepted. The first
+start on Windows asks whether the firewall may allow it.
 
 **DOS client** (needs a packet driver and an mTCP configuration, see the mTCP
 documentation):

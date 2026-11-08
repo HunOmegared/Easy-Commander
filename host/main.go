@@ -15,6 +15,7 @@
 //
 // Discovery (UDP, same port number): "ECDISC 1" is answered with
 // "ECHOST 1 <tcp port> <name>".
+//
 //	errors           -> ERR <code> <message>
 //
 // The client only ever sees DOS 8.3 names. The host maps long names to
@@ -24,12 +25,10 @@ package main
 import (
 	"bufio"
 	"errors"
-	"flag"
 	"fmt"
 	"hash/crc32"
 	"io"
 	"io/fs"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -506,6 +505,16 @@ func (s *server) cmdGet(conn net.Conn, w *bufio.Writer, arg string) bool {
 	return sent == size
 }
 
+// quietCommand is true for the follow-up blocks of a file transfer (GET with
+// an offset): they would fill the log with one line per 64 KB.
+func quietCommand(cmd, arg string) bool {
+	if cmd != "GET" {
+		return false
+	}
+	f := strings.Fields(arg)
+	return len(f) >= 2 && f[1] != "0"
+}
+
 func (s *server) handle(conn net.Conn) {
 	defer conn.Close()
 	remote := conn.RemoteAddr().String()
@@ -529,7 +538,9 @@ func (s *server) handle(conn net.Conn) {
 			cmd, arg = line[:i], strings.TrimSpace(line[i+1:])
 		}
 		cmd = strings.ToUpper(cmd)
-		log.Printf("%s %s %s", remote, cmd, arg)
+		if !quietCommand(cmd, arg) {
+			logf("%s %s %s", remote, cmd, arg)
+		}
 
 		switch cmd {
 		case "HELLO":
@@ -612,7 +623,7 @@ func serveDiscovery(pc net.PacketConn, tcpPort int, name string) {
 		if strings.TrimSpace(string(buf[:n])) != discoveryRequest {
 			continue
 		}
-		log.Printf("%s asked who is here", addr)
+		logf("%s asked who is here", addr)
 		pc.WriteTo(reply, addr)
 	}
 }
@@ -628,100 +639,4 @@ func localIPs() []string {
 		}
 	}
 	return out
-}
-
-func fatal(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "\nERROR: "+format+"\n", args...)
-	fmt.Print("Press Enter to exit...")
-	bufio.NewReader(os.Stdin).ReadString('\n')
-	os.Exit(1)
-}
-
-func main() {
-	dirFlag := flag.String("dir", "", "folder to share (or give it as the first argument / drop it on the program)")
-	port := flag.Int("port", 6502, "TCP port to listen on (and UDP port for host searches)")
-	name := flag.String("name", "", "name shown to clients that search for hosts (default: the computer name)")
-	flag.Parse()
-
-	dir := *dirFlag
-	if dir == "" && flag.NArg() > 0 {
-		dir = flag.Arg(0)
-	}
-	if dir == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			fatal("cannot determine current folder: %v", err)
-		}
-		dir = filepath.Join(cwd, "share")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			fatal("cannot create %s: %v", dir, err)
-		}
-	}
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		fatal("bad folder: %v", err)
-	}
-	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		fatal("%s is not a folder", abs)
-	}
-
-	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", *port))
-	if err != nil {
-		fatal("cannot listen on port %d: %v", *port, err)
-	}
-
-	fmt.Printf("Easy Commander host (read-only)\n")
-	fmt.Printf("Sharing folder: %s\n", abs)
-	fmt.Printf("Port: %d\n", *port)
-	if ips := localIPs(); len(ips) > 0 {
-		fmt.Println("Enter one of these addresses in the DOS client:")
-		for _, ip := range ips {
-			fmt.Printf("  %s\n", ip)
-		}
-	}
-	fmt.Println("Only local network (private) addresses are accepted. Ctrl+C to stop.")
-
-	hostLabel := *name
-	if hostLabel == "" {
-		hostLabel, _ = os.Hostname()
-	}
-	hostLabel = sanitizeName(hostLabel)
-
-	if pc, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", *port)); err != nil {
-		fmt.Printf("Host search is off (UDP port %d: %v)\n", *port, err)
-	} else {
-		fmt.Printf("Answering host searches on UDP port %d as %q\n", *port, hostLabel)
-		go serveDiscovery(pc, *port, hostLabel)
-	}
-	fmt.Println()
-
-	srv := &server{root: abs}
-	sem := make(chan struct{}, maxClients)
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return
-			}
-			log.Printf("accept: %v", err)
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		if !allowedRemote(conn.RemoteAddr()) {
-			log.Printf("rejected non-local connection from %s", conn.RemoteAddr())
-			conn.Close()
-			continue
-		}
-		select {
-		case sem <- struct{}{}:
-			go func() {
-				defer func() { <-sem }()
-				srv.handle(conn)
-			}()
-		default:
-			w := bufio.NewWriter(conn)
-			writeErr(w, errBusy)
-			conn.Close()
-		}
-	}
 }

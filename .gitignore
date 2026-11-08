@@ -9,6 +9,7 @@
 *.ERR
 host/easycommander
 host/easycommander-host
+host/echost
 
 # ECTEST.CFG and NC.CFG are unchanged copies from the mTCP source tree; they are
 # only copied next to the DOS sources while building (see docs/BUILDING.md).
@@ -19,3 +20,6 @@ NC.CFG
 # Editor leftovers
 *.bak
 *~
+
+# Settings of the window version of the host (next to the program)
+echost.ini

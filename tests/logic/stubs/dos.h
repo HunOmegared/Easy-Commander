@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <string>
+#include <vector>
+#include <utility>
 #define __far
 static unsigned char g_scratch[65536];
 #define MK_FP(s,o) ((void*)(g_scratch + (o)))
@@ -45,4 +47,7 @@ static inline unsigned _dos_setfileattr(const char *p, unsigned){ std::string s=
 static unsigned g_drive=3;
 static inline void _dos_getdrive(unsigned *d){ *d=g_drive; }
 static inline void _dos_setdrive(unsigned d, unsigned *total){ if(d==1||d==3||d==4) g_drive=d; *total=5; }
+// file dates: remember what the client sets
+static std::vector<std::pair<unsigned,unsigned> > g_ftimes;
+static inline unsigned _dos_setftime(int, unsigned d, unsigned t){ g_ftimes.push_back(std::make_pair(d,t)); return 0; }
 static inline void _harderr(int (*)(unsigned,unsigned,unsigned*)){}
