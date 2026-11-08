@@ -34,6 +34,9 @@ host search and switching between two hosts worked on all of them.
   with their subfolders, keeping the structure.
 * Optional CRC32 check of every downloaded file (read back from disk). A faster
   CRC32 loop for slow CPUs is on by default (same result; F9 switches it off).
+* View a file with F3, on the host or on the local disk: text or hex (F4), search
+  (F7), scrolling with the cursor keys. A file on the host is read in pieces,
+  so only what you look at is transferred.
 * Cancel a download with Esc; existing files are never overwritten without asking.
 * **Download only, by design:** the host shares a folder read-only and the client
   has no upload. Nothing on the host can be changed, renamed or deleted from the
@@ -69,6 +72,7 @@ documentation):
 | Tab | switch panel |
 | Insert | select / unselect, move down |
 | `+` `-` `*` | select all files / none / invert |
+| F3 | view the file under the cursor (in the viewer: F4 hex/text, F7 search, Left/Right sideways, Esc or F10 close) |
 | F5 | download the selected items (or the one under the cursor) to the right panel's folder |
 | F7 | make a folder (right panel) |
 | F8 | delete (right panel only; only `Y` confirms) |
@@ -142,7 +146,7 @@ download itself unless the fast CRC32 loop (F9) is used.
 ## Roadmap
 
 * Test on more hardware (other network cards and packet drivers, 286 and 386 machines, less RAM).
-* Select by mask (`+` with `*.TXT`), file viewer (F3), keep file dates.
+* Select by mask (`+` with `*.TXT`), keep file dates.
 
 ## License
 

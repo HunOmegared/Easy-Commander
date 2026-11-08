@@ -30,6 +30,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <conio.h>
+#include <bios.h>
 #include <dos.h>
 #include <i86.h>
 #include <direct.h>
@@ -97,6 +98,8 @@ typedef unsigned long  u32;
 #define K_INS   0x152
 #define K_F1    0x13B
 #define K_F2    0x13C
+#define K_F3    0x13D
+#define K_F4    0x13E
 #define K_F5    0x13F
 #define K_F7    0x141
 #define K_F8    0x142
@@ -929,7 +932,7 @@ static int KeyBarAlt = 0;      // which labels are on the screen right now
 static void drawKeyBar( void ) {
 
   static const char *normal[10] = {
-    "Help", "Reconn", "", "", "Get", "", "MkDir", "Delete", "Opts", "Quit"
+    "Help", "Reconn", "View", "", "Get", "", "MkDir", "Delete", "Opts", "Quit"
   };
 
   static const char *withAlt[10] = {
@@ -1659,6 +1662,601 @@ static void cmdOptions( void ) {
     }
     if ( (k == 13) || (k == 27) ) break;
   }
+}
+
+// ---------------------------------------------------------------------
+// File viewer (F3).  Works on a file of the host (read in pieces with GET
+// offset length, so only what is looked at is transferred) or on a local file.
+// Only a window of the file is kept in memory.  Text mode shows lines (cut
+// into pieces of VIEW_MAXLINE bytes when there is no line end); hex mode
+// shows 16 bytes per row.
+
+#define VIEW_WIN      40960u    // bytes kept in memory
+#define VIEW_PRE      12288u    // a new window starts this far before the top line
+#define VIEW_BACK      4096u    // at least this much must be kept before the top line
+#define VIEW_AHEAD    12288u    // at least this much must be kept after the top line
+#define VIEW_MAXLINE    512u    // a text line is never longer than this
+#define VIEW_SBUF      8192u    // search block
+#define VIEW_ROWS        23
+
+#define A_VIEWHEAD  0x30
+#define A_VIEWTEXT  0x1B
+
+static int       VRemote;
+static char      VPath[300];
+static FILE     *VFile;
+static u32       VSize;
+static u8       *VBuf;            // the window
+static u8       *VSbuf;           // search block
+static u32       VBase;           // file offset of VBuf[0]
+static uint16_t  VLen;            // bytes in the window
+static int       VLoaded;
+static u32       VPos;            // file offset of the first line on the screen
+static int       VHex;
+static uint16_t  VCol;
+static char      VSearch[40];
+static u32       VNext;           // where a repeated search continues
+static int       VFound;
+static int       VError;          // reading failed while viewing: the viewer closes
+
+// Read len bytes at offset off into dst.  Returns the number of bytes (less
+// than len only at the end of the file), or -1 (see ErrMsg).  This is a long:
+// an int has only 16 bits in this compiler and a window is bigger than 32767.
+static long viewRead( u32 off, uint16_t len, u8 *dst ) {
+
+  if ( off >= VSize ) return 0;
+  if ( (u32)len > VSize - off ) len = (uint16_t)(VSize - off);
+
+  if ( !VRemote ) {
+    if ( fseek( VFile, (long)off, SEEK_SET ) ) {
+      ErrMsg = "cannot read the file";
+      return -1;
+    }
+    uint16_t n = (uint16_t)fread( dst, 1, len, VFile );
+    if ( (n != len) && ferror( VFile ) ) {
+      ErrMsg = "cannot read the file";
+      return -1;
+    }
+    return (long)n;
+  }
+
+  char cmd[340];
+  char line[300];
+
+  if ( !ensureConnected( ) ) return -1;
+
+  sprintf( cmd, "GET %s %lu %u", VPath, (unsigned long)off, (unsigned)len );
+
+  if ( sendCommand( cmd ) || (readLine( line, sizeof( line ) ) < 0) ) {
+    Connected = 0;
+    return -1;
+  }
+
+  if ( (line[0] != 'O') || (line[1] != 'K') ) {
+    strncpy( HostMsg, line, sizeof( HostMsg ) - 1 );
+    HostMsg[sizeof( HostMsg ) - 1] = 0;
+    ErrMsg = HostMsg;
+    return -1;
+  }
+
+  char *endp;
+  u32 n = strtoul( afterOk( line ), &endp, 10 );
+  u32 total = strtoul( endp, NULL, 10 );
+
+  if ( (n > (u32)len) || (total != VSize) ) {
+    ErrMsg = (n > (u32)len) ? "unexpected answer from the host" : "the file changed on the host";
+    Connected = 0;                 // the answer is not read: start the session again
+    return -1;
+  }
+
+  uint16_t got = 0;
+  u32 left = n;
+
+  while ( left ) {
+
+    if ( waitData( ) < 0 ) {
+      Connected = 0;
+      return -1;
+    }
+
+    uint16_t avail = RxLen - RxPos;
+    uint16_t chunk = avail;
+    if ( left < avail ) chunk = (uint16_t)left;
+
+    memcpy( dst + got, Rx + RxPos, chunk );
+    RxPos += chunk;
+    got += chunk;
+    left -= chunk;
+  }
+
+  return (long)got;
+}
+
+// Make sure that the window holds the bytes around pos: at least VIEW_BACK
+// before it (unless that is the start of the file) and VIEW_AHEAD after it
+// (unless that is the end of the file).  A new window starts VIEW_PRE before
+// pos, which leaves room to scroll in both directions without reading again.
+// Returns 0 or -1.
+static int viewEnsure( u32 pos ) {
+
+  if ( VLoaded && (pos >= VBase) && (pos <= VBase + VLen) &&
+       ((VBase == 0) || ((pos - VBase) >= VIEW_BACK)) &&
+       (((VBase + VLen) >= VSize) || ((VBase + VLen - pos) >= VIEW_AHEAD)) ) {
+    return 0;
+  }
+
+  u32 start = (pos > VIEW_PRE) ? (pos - VIEW_PRE) : 0;
+
+  long n = viewRead( start, VIEW_WIN, VBuf );
+  if ( n < 0 ) {
+    VError = 1;
+    return -1;
+  }
+
+  VBase = start;
+  VLen = (uint16_t)n;
+  VLoaded = 1;
+  return 0;
+}
+
+// Start of the line (piece) that contains the byte at pos.
+static u32 viewLineStart( u32 pos ) {
+
+  u32 s0 = pos;
+
+  while ( s0 > VBase ) {
+    if ( VBuf[(uint16_t)(s0 - 1 - VBase)] == '\n' ) break;
+    s0--;
+  }
+
+  return s0 + ((pos - s0) / VIEW_MAXLINE) * VIEW_MAXLINE;
+}
+
+// Start of the line after the one that starts at p.
+static u32 viewNextLine( u32 p ) {
+
+  u32 lim = p + VIEW_MAXLINE;
+  if ( lim > VSize ) lim = VSize;
+  if ( lim > VBase + VLen ) lim = VBase + VLen;
+
+  while ( p < lim ) {
+    if ( VBuf[(uint16_t)(p - VBase)] == '\n' ) return p + 1;
+    p++;
+  }
+
+  return p;
+}
+
+// n lines back from p (p is a line start; stops at the start of the file).
+static u32 viewBackLines( u32 p, int n ) {
+
+  while ( (n > 0) && (p > 0) ) {
+    if ( viewEnsure( p ) ) return p;
+    p = viewLineStart( p - 1 );
+    n--;
+  }
+
+  return p;
+}
+
+// n lines forward from p; stops at the last line.  *hitEnd is set if it did.
+static u32 viewForwardLines( u32 p, int n, int *hitEnd ) {
+
+  *hitEnd = 0;
+
+  while ( n > 0 ) {
+    if ( viewEnsure( p ) ) return p;
+    u32 q = viewNextLine( p );
+    if ( q >= VSize ) { *hitEnd = 1; break; }
+    p = q;
+    n--;
+  }
+
+  return p;
+}
+
+// The top line of the last full page.
+static u32 viewLastPage( void ) {
+
+  if ( VSize == 0 ) return 0;
+
+  if ( VHex ) {
+    u32 rows = (VSize + 15) / 16;
+    return (rows > VIEW_ROWS) ? ((rows - VIEW_ROWS) * 16) : 0;
+  }
+
+  if ( viewEnsure( VSize ) ) return 0;
+  return viewBackLines( VSize, VIEW_ROWS );
+}
+
+static const char *viewErr( void ) {
+  return (ErrMsg && ErrMsg[0]) ? ErrMsg : "unknown error";
+}
+
+static void viewDrawKeyBar( void ) {
+
+  const char *labels[10] = { "", "", "", "", "", "", "Search", "", "", "Quit" };
+  labels[3] = VHex ? "Text" : "Hex";
+
+  for ( int i = 0; i < 10; i++ ) {
+    char num[4];
+    sprintf( num, "%d", i + 1 );
+    int x = i * 8;
+    putStr( x, 24, num, A_KEYNUM );
+    putStrPad( x + (int)strlen( num ), 24, labels[i], 8 - (int)strlen( num ), A_KEYTXT );
+  }
+}
+
+// Draws the screen.  Returns the file offset after the last byte shown.
+static u32 viewDraw( void ) {
+
+  char head[100];
+  u32 p = VPos;
+  u32 shownEnd = VPos;
+
+  uiFill( 0, 1, SCR_W, VIEW_ROWS, ' ', A_VIEWTEXT );
+
+  for ( int row = 0; row < VIEW_ROWS; row++ ) {
+
+    if ( p >= VSize ) break;
+    if ( viewEnsure( p ) ) break;
+
+    int y = 1 + row;
+
+    if ( VHex ) {
+
+      char line[100];
+      int n = 16;
+      if ( (VSize - p) < 16 ) n = (int)(VSize - p);
+
+      int c = sprintf( line, "%08lX: ", (unsigned long)p );
+      for ( int i = 0; i < 16; i++ ) {
+        if ( i == 8 ) line[c++] = ' ';
+        if ( i < n ) c += sprintf( line + c, "%02X ", (unsigned)VBuf[(uint16_t)(p - VBase) + i] );
+        else         c += sprintf( line + c, "   " );
+      }
+      line[c++] = ' ';
+      for ( int i = 0; i < n; i++ ) {
+        u8 b = VBuf[(uint16_t)(p - VBase) + i];
+        line[c++] = (b < 32) ? '.' : (char)b;
+      }
+      line[c] = 0;
+      putStr( 0, y, line, A_VIEWTEXT );
+
+      p += n;
+    }
+    else {
+
+      u32 e = viewNextLine( p );
+      uint16_t vx = 0;
+
+      for ( u32 o = p; o < e; o++ ) {
+
+        u8 b = VBuf[(uint16_t)(o - VBase)];
+
+        if ( (b == '\n') || (b == '\r') ) continue;
+
+        if ( b == '\t' ) {
+          uint16_t stop = (uint16_t)((vx + 8) & ~7u);
+          while ( vx < stop ) {
+            if ( (vx >= VCol) && ((vx - VCol) < SCR_W) ) putCh( vx - VCol, y, ' ', A_VIEWTEXT );
+            vx++;
+          }
+        }
+        else {
+          if ( (vx >= VCol) && ((vx - VCol) < SCR_W) ) putCh( vx - VCol, y, (b < 32) ? '.' : b, A_VIEWTEXT );
+          vx++;
+        }
+
+        if ( (vx - VCol) >= SCR_W ) break;
+      }
+
+      p = e;
+    }
+
+    shownEnd = p;
+  }
+
+  // Header: name, column, size, how far we are.
+  uiFill( 0, 0, SCR_W, 1, ' ', A_VIEWHEAD );
+
+  {
+    int len = (int)strlen( VPath );
+    sprintf( head, "View: %s", (len > 34) ? (VPath + len - 34) : VPath );
+    putStr( 0, 0, head, A_VIEWHEAD );
+  }
+
+  if ( VHex ) strcpy( head, "Hex" );
+  else        sprintf( head, "Col %u", (unsigned)VCol );
+  putStr( 42, 0, head, A_VIEWHEAD );
+
+  sprintf( head, "%lu Bytes", (unsigned long)VSize );
+  putStr( 56, 0, head, A_VIEWHEAD );
+
+  sprintf( head, "%3d%%", percent( shownEnd, VSize ) );
+  putStr( 76, 0, head, A_VIEWHEAD );
+
+  viewDrawKeyBar( );
+
+  return shownEnd;
+}
+
+// True if Esc was pressed.  Any other key stays in the keyboard buffer.
+static int viewEscPressed( void ) {
+  if ( _bios_keybrd( _KEYBRD_READY ) != 0x011B ) return 0;
+  _bios_keybrd( _KEYBRD_READ );
+  return 1;
+}
+
+// Looks for needle from offset from on.  Returns 1 (found, *at set), 0 (not
+// found), 2 (cancelled with Esc) or -1 (error, see ErrMsg).
+static int viewSearch( u32 from, const char *needle, u32 *at ) {
+
+  char nd[40];
+  uint16_t nl = (uint16_t)strlen( needle );
+
+  if ( (nl == 0) || (nl > 38) ) return 0;
+
+  for ( uint16_t i = 0; i <= nl; i++ ) nd[i] = (char)toupper( (unsigned char)needle[i] );
+
+  u32 off = from;
+
+  while ( off < VSize ) {
+
+    char msg[40];
+    sprintf( msg, "Searching %3d%%  (Esc cancels)", percent( off, VSize ) );
+    putStrPad( 0, 0, msg, SCR_W, A_VIEWHEAD );
+
+    long n = viewRead( off, VIEW_SBUF, VSbuf );
+    if ( n < 0 ) return -1;
+    if ( n == 0 ) break;
+
+    for ( int i = 0; (i + nl) <= n; i++ ) {
+      uint16_t k = 0;
+      while ( (k < nl) && ((char)toupper( VSbuf[i + k] ) == nd[k]) ) k++;
+      if ( k == nl ) {
+        *at = off + (u32)i;
+        return 1;
+      }
+    }
+
+    if ( (off + (u32)n) >= VSize ) break;
+
+    off += (u32)n - (u32)(nl - 1);
+
+    if ( viewEscPressed( ) ) return 2;
+  }
+
+  return 0;
+}
+
+static void viewFindText( void ) {
+
+  char text[40];
+  strcpy( text, VSearch );
+
+  if ( !inputBox( "Search", "Search for:", text, 38 ) ) return;
+
+  u32 from = VPos;
+  if ( VFound && (strcmp( text, VSearch ) == 0) ) from = VNext;
+  strcpy( VSearch, text );
+
+  u32 at = 0;
+  int rc = viewSearch( from, text, &at );
+
+  if ( rc == 1 ) {
+    VFound = 1;
+    VNext = at + 1;
+    if ( VHex ) {
+      VPos = at & ~15UL;
+    }
+    else if ( viewEnsure( at ) == 0 ) {
+      VPos = viewLineStart( at );
+    }
+  }
+  else if ( rc == 0 ) {
+    VFound = 0;
+    uiMessage( "Search", "Not found.", NULL );
+  }
+  else if ( rc == -1 ) {
+    VFound = 0;
+    uiMessage( "Search", "Reading the file failed:", viewErr( ) );
+  }
+}
+
+// One key in the viewer.  Returns 0 when the viewer should close.
+static int viewKey( int k ) {
+
+  switch ( k ) {
+
+    case K_F3:
+    case K_F10:
+    case 27:
+      return 0;
+
+    case K_UP:
+      if ( VPos > 0 ) {
+        if ( VHex ) VPos = (VPos >= 16) ? (VPos - 16) : 0;
+        else if ( viewEnsure( VPos ) == 0 ) VPos = viewLineStart( VPos - 1 );
+      }
+      break;
+
+    case K_DOWN:
+      if ( VHex ) {
+        if ( (VPos + 16) < VSize ) VPos += 16;
+      }
+      else if ( viewEnsure( VPos ) == 0 ) {
+        u32 q = viewNextLine( VPos );
+        if ( q < VSize ) VPos = q;
+      }
+      break;
+
+    case K_PGUP:
+      if ( VHex ) VPos = (VPos >= 16UL * VIEW_ROWS) ? (VPos - 16UL * VIEW_ROWS) : 0;
+      else VPos = viewBackLines( VPos, VIEW_ROWS );
+      break;
+
+    case K_PGDN:
+      if ( VHex ) {
+        u32 last = viewLastPage( );
+        VPos += 16UL * VIEW_ROWS;
+        if ( VPos > last ) VPos = last;
+      }
+      else {
+        int hit, hit2 = 0;
+        u32 q = viewForwardLines( VPos, VIEW_ROWS, &hit );
+
+        // Is the page at q full?  A line is at most VIEW_MAXLINE bytes, so
+        // that much text after q holds enough lines without looking.
+        if ( !hit && ((VSize - q) <= (u32)(VIEW_ROWS - 1) * VIEW_MAXLINE) ) {
+          viewForwardLines( q, VIEW_ROWS - 1, &hit2 );
+        }
+
+        if ( hit || hit2 ) {
+          u32 last = viewLastPage( );
+          if ( last > VPos ) VPos = last;
+        }
+        else {
+          VPos = q;
+        }
+      }
+      break;
+
+    case K_HOME:
+      VPos = 0;
+      break;
+
+    case K_END:
+      VPos = viewLastPage( );
+      break;
+
+    case K_LEFT:
+      if ( !VHex ) VCol = (VCol >= 8) ? (VCol - 8) : 0;
+      break;
+
+    case K_RIGHT:
+      if ( !VHex && (VCol < 480) ) VCol += 8;
+      break;
+
+    case K_F4:
+      if ( VHex ) {
+        VHex = 0;
+        if ( viewEnsure( VPos ) == 0 ) VPos = viewLineStart( VPos );
+      }
+      else {
+        VHex = 1;
+        VPos &= ~15UL;
+      }
+      VCol = 0;
+      break;
+
+    case K_F7:
+      viewFindText( );
+      break;
+
+    default:
+      break;
+  }
+
+  return 1;
+}
+
+// Opens a file for viewing.  Returns 0 or -1 (the user has been told why).
+static int viewOpen( int remote, const char *path, u32 size ) {
+
+  strcpy( VPath, path );
+
+  VRemote = remote;
+  VSize = size;
+  VFile = NULL;
+  VLoaded = 0;
+  VBase = 0;
+  VLen = 0;
+  VPos = 0;
+  VHex = 0;
+  VCol = 0;
+  VFound = 0;
+  VError = 0;
+
+  VBuf = (u8 *)malloc( VIEW_WIN );
+  VSbuf = (u8 *)malloc( VIEW_SBUF );
+
+  if ( !VBuf || !VSbuf ) {
+    uiMessage( "View", "Not enough memory.", NULL );
+    free( VBuf );
+    free( VSbuf );
+    VBuf = VSbuf = NULL;
+    return -1;
+  }
+
+  if ( !VRemote ) {
+    VFile = fopen( VPath, "rb" );
+    if ( VFile == NULL ) {
+      uiMessage( "View", "Cannot open the file.", NULL );
+      free( VBuf );
+      free( VSbuf );
+      VBuf = VSbuf = NULL;
+      return -1;
+    }
+  }
+
+  if ( (VSize > 0) && viewEnsure( 0 ) ) {
+    uiMessage( "View", "Cannot read the file:", viewErr( ) );
+    if ( VFile ) fclose( VFile );
+    VFile = NULL;
+    free( VBuf );
+    free( VSbuf );
+    VBuf = VSbuf = NULL;
+    return -1;
+  }
+
+  return 0;
+}
+
+static void viewClose( void ) {
+
+  if ( VFile ) fclose( VFile );
+  VFile = NULL;
+  free( VBuf );
+  free( VSbuf );
+  VBuf = NULL;
+  VSbuf = NULL;
+}
+
+static void cmdView( void ) {
+
+  Panel *p = Active ? &Right : &Left;
+
+  if ( p->count == 0 ) return;
+
+  Item *it = &p->items[p->cur];
+
+  if ( it->isDir ) return;
+
+  char path[300];
+  joinPath( path, p->path, it->name );
+
+  if ( strlen( path ) > 230 ) {
+    uiMessage( "View", "The path is too long.", NULL );
+    return;
+  }
+
+  if ( viewOpen( p->remote, path, it->size ) ) return;
+
+  while ( 1 ) {
+    viewDraw( );
+    if ( VError ) {
+      uiMessage( "View", "Reading the file failed:", viewErr( ) );
+      break;
+    }
+    if ( !viewKey( uiReadKey( ) ) ) break;
+    if ( VError ) {
+      uiMessage( "View", "Reading the file failed:", viewErr( ) );
+      break;
+    }
+  }
+
+  viewClose( );
 }
 
 // ---------------------------------------------------------------------
@@ -2623,7 +3221,7 @@ static unsigned freeMemKB( void ) {
 
 static void cmdHelp( void ) {
 
-  const char *lines[13];
+  const char *lines[14];
   char memLine[80];
 
   lines[0]  = "Up/Down/PgUp/PgDn/Home/End   move the cursor";
@@ -2636,13 +3234,14 @@ static void cmdHelp( void ) {
   lines[7]  = "F8          delete (right panel only, asks first)";
   lines[8]  = "F9          options (CRC32 check of every download)";
   lines[9]  = "F2 reconnect   Alt+F1 find/choose host   Alt+F2 drive";
-  lines[10] = "F10 or Esc  quit";
-  lines[11] = "Esc during a download cancels it.";
+  lines[10] = "F3          view a file (F4 hex/text, F7 search, Esc close)";
+  lines[11] = "F10 or Esc  quit";
+  lines[12] = "Esc during a download cancels it.";
 
   sprintf( memLine, "Free memory now: %u KB (compare with MEM before EC)", freeMemKB( ) );
-  lines[12] = memLine;
+  lines[13] = memLine;
 
-  uiDialog( "Easy Commander - help", lines, 13, 0 );
+  uiDialog( "Easy Commander - help", lines, 14, 0 );
 }
 
 static void selectAll( Panel *p, int mode ) {   // 0 none, 1 all files, 2 invert files
@@ -2684,6 +3283,7 @@ static void handleKey( int k ) {
     case '-':    selectAll( p, 0 ); break;
     case '*':    selectAll( p, 2 ); break;
 
+    case K_F3:   cmdView( ); break;
     case K_F5:   cmdDownload( ); break;
     case K_F7:   cmdMakeDir( ); break;
     case K_F8:   cmdDelete( ); break;
