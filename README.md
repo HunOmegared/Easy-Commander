@@ -16,7 +16,7 @@ how to use.
 
 ## Status
 
-Early, but working. Tested in an emulated PC (86Box, MS-DOS 6.22, NE2000
+Version 1.0. Tested in an emulated PC (86Box, MS-DOS 6.22, NE2000
 compatible network card) and on two real machines, both with a CompactFlash card
 instead of a hard disk and an RTL8019AS ISA network card with the Realtek packet
 driver: an AMD 5x86-133 with 8 MB RAM, and a Cyrix 486DLC with 4 MB RAM (with an
@@ -48,30 +48,83 @@ host search and switching between two hosts worked on all of them.
 
 ## Quick start
 
-**Host (modern PC)** - see [docs/BUILDING.md](docs/BUILDING.md):
+You need two computers on the same local network (Ethernet, or Wi-Fi on the
+modern side):
 
-    echost.exe
+* the **host**: a modern PC with Windows 10 or newer (or Linux) that has the
+  files you want to copy;
+* the **DOS PC**: MS-DOS with a network card, its **packet driver**, and an
+  **mTCP configuration** (Easy Commander uses the mTCP TCP/IP stack, so the
+  network setup is the same as for any other mTCP program).
 
-On Windows it opens a small window: the shared folder (Browse...), the name
-shown to DOS clients, the port, a Start/Stop button, the address to type into
-the DOS client and a list of what the clients do. Sharing starts at once. When
-the window is closed the host keeps running in the notification area (tray); a
-right click on its icon has Open, Start/Stop and Exit. The settings are kept in
-`echost.ini` next to the program. `echost.exe -console` runs it
-without a window, and on Linux it always runs in the console:
+**1. Download.** Get `EC.EXE` (the DOS client) and `echost.exe` (the Windows
+host) from the [latest release](https://github.com/HunOmegared/Easy-Commander/releases/latest).
+On Linux build the host from source (`cd host && go build -o echost`, see
+[docs/BUILDING.md](docs/BUILDING.md)).
 
-    echost C:\path\to\shared\folder
+**2. Start the host** on the modern PC: run `echost.exe`. Windows asks once
+whether the firewall may allow it: allow it on private networks. It opens a
+small window; choose the folder to share with *Browse...* (sharing starts at
+once) and note the address it shows, for example `192.168.1.10`.
 
 ![The host window](docs/host-window.png)
 
+The window can be closed: the host keeps running in the notification area
+(tray); a right click on its icon has Open, Start/Stop and Exit. The settings
+are kept in `echost.ini` next to the program. `echost.exe -console` runs it
+without a window, and on Linux it always runs in the console:
+
+    echost /path/to/shared/folder
+
 The host listens on TCP port 6502 (and UDP 6502 for host searches). Only
-connections from private (local network) addresses are accepted. The first
-start on Windows asks whether the firewall may allow it.
+connections from private (local network) addresses are accepted, and it can
+only read: nothing can be written to the shared folder from the DOS side.
 
-**DOS client** (needs a packet driver and an mTCP configuration, see the mTCP
-documentation):
+**3. Get the client onto the DOS PC.** Copy `EC.EXE` there once, in any way you
+like (floppy, CompactFlash card in a reader, serial cable ...).
 
-    EC 192.168.1.10          (or: EC host-name [port])
+**4. Bring up the network on the DOS PC** as for any mTCP program: load the
+packet driver of your card, tell mTCP where its configuration is, and (if you
+do not use fixed addresses) run `DHCP`. For example, with a packet driver on
+interrupt 0x60 (the driver's name and parameters depend on your card; see its
+documentation and the mTCP documentation):
+
+    <your packet driver> 0x60
+    SET MTCPCFG=C:\MTCP\MTCP.CFG
+    DHCP
+
+A `MTCP.CFG` for fixed addresses looks like this:
+
+    PACKETINT 0x60
+    IPADDR 192.168.1.50
+    NETMASK 255.255.255.0
+    GATEWAY 192.168.1.1
+
+**5. Start Easy Commander:**
+
+    EC
+
+The first time, it looks for hosts on the network by itself and connects to the
+one it finds (or shows a list when there are several). It remembers the host in
+`EC.INI`. To use a given host: `EC 192.168.1.10` (or `EC host-name [port]`).
+
+The host's folder is the left panel, the current folder of the DOS PC the right
+one. Move with the cursor keys, **Tab** switches panels, **Enter** opens a
+folder, **Insert** (or `+` with a mask such as `*.TXT`) selects files, **F5**
+downloads the selected files and folders to the folder in the right panel,
+**F3** looks into a file (a driver's README, say), **F10** quits. All keys are
+in the table below.
+
+If something does not work:
+
+* *No host found / could not connect:* the two computers must be in the same
+  network (the search is a broadcast and does not cross routers). Type the
+  host's address: `EC 192.168.1.10`. Check that the host window says "Sharing"
+  and that the firewall allows it.
+* *Complaints about the configuration or the packet driver at start:* the
+  network is not set up yet (try `PING` from the mTCP package first).
+* *Slow:* see [Performance](#performance); on old machines the disk, not the
+  network, is the limit.
 
 ## Keys
 
@@ -145,8 +198,7 @@ download itself unless the fast CRC32 loop (F9) is used.
   prints it too with that compiler, and it disappears when EC and ECTEST are
   built with Open Watcom 1.9. Every CRC32 check passed with both compilers.
 * The client only sees DOS 8.3 names; the host maps long names to
-  `BASE~1.EXT` style names. File dates are not restored (copies get the
-  current date).
+  `BASE~1.EXT` style names.
 * The host search is a broadcast: it does not cross routers, and hosts started
   with another `-port` are not found by it (type their address instead). In the
   86Box "SLIRP" network mode the host is found but listed as 127.0.0.1; type
