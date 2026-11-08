@@ -7,3 +7,4 @@ go.mod    text eol=lf
 *.CPP     text eol=crlf
 MAKEFILE  text eol=crlf
 *.CFG     text eol=crlf
+*.bat     text eol=crlf
