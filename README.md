@@ -30,7 +30,8 @@ Realtek packet driver. Everything behaved the same as in the emulator.
 
 * Browse the host's folders, select with Insert, download files and folders
   with their subfolders, keeping the structure.
-* Optional CRC32 check of every downloaded file (read back from disk).
+* Optional CRC32 check of every downloaded file (read back from disk). A faster
+  CRC32 loop for slow CPUs is on by default (same result; F9 switches it off).
 * Cancel a download with Esc; existing files are never overwritten without asking.
 * Delete files and folders on the *local* side (F8). The host is always read-only.
 * Switch drives (Alt+F2) and host (Alt+F1).
@@ -66,7 +67,7 @@ documentation):
 | F5 | download the selected items (or the one under the cursor) to the right panel's folder |
 | F7 | make a folder (right panel) |
 | F8 | delete (right panel only; only `Y` confirms) |
-| F9 | options (CRC32 check of every download) |
+| F9 | options (CRC32 check of every download, fast CRC32 code) |
 | F2 | reconnect and refresh the host panel |
 | Alt+F1 | connect to another host |
 | Alt+F2 | change drive (right panel) |

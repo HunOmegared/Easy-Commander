@@ -1074,10 +1074,38 @@ static uint8_t      *CrcBuf;
 static char         *DiskBuf;         // bigger output buffer: fewer, larger disk writes
 static uint32_t      CrcTable[256];
 static int           Verify = 0;          // F9: check every file with CRC32
+static int           FastCrc = 1;         // F9: faster CRC32 loop (same result, for slow CPUs)
+static int           FastCrcOk = 0;       // set by the self-test in initCrcTable
 static int           OverwriteMode = 0;   // 0 ask, 1 overwrite all, 2 skip all
 static char          LastError[120];
 
 // ---- CRC32 (same code as the test client) ----
+
+// The classic loop: one 32 bit shift and one 32 bit XOR per byte.  On a
+// 16 bit compiler every 32 bit operation takes several instructions.
+static uint32_t crcStandard( uint32_t crc, const uint8_t *buf, uint16_t n ) {
+  for ( uint16_t i = 0; i < n; i++ ) {
+    crc = CrcTable[ (crc ^ buf[i]) & 0xFF ] ^ (crc >> 8);
+  }
+  return crc;
+}
+
+// The same calculation with the CRC kept as two 16 bit halves (little endian:
+// the table entry's low word comes first).  No 32 bit shifts are needed, which
+// is much faster on 8086..386 class CPUs.  The result is identical.
+static uint32_t crcFast( uint32_t crc, const uint8_t *buf, uint16_t n ) {
+
+  uint16_t lo = (uint16_t)crc;
+  uint16_t hi = (uint16_t)(crc >> 16);
+
+  for ( uint16_t i = 0; i < n; i++ ) {
+    const uint16_t *t = (const uint16_t *)&CrcTable[ (uint8_t)(lo ^ buf[i]) ];
+    lo = (uint16_t)((lo >> 8) | (hi << 8)) ^ t[0];
+    hi = (uint16_t)(hi >> 8) ^ t[1];
+  }
+
+  return ((uint32_t)hi << 16) | lo;
+}
 
 static void initCrcTable( void ) {
 
@@ -1089,6 +1117,10 @@ static void initCrcTable( void ) {
     }
     CrcTable[n] = c;
   }
+
+  // Self-test of the fast loop with the standard CRC32 check value.  If it
+  // ever gives another answer, the standard loop is used instead.
+  FastCrcOk = ( (crcFast( 0xFFFFFFFFUL, (const uint8_t *)"123456789", 9 ) ^ 0xFFFFFFFFUL) == 0xCBF43926UL );
 
 }
 
@@ -1111,9 +1143,8 @@ static int crcOfFile( const char *name, uint32_t *crcOut, uint32_t *sizeOut ) {
 
     size += n;
 
-    for ( uint16_t i = 0; i < n; i++ ) {
-      crc = CrcTable[ (crc ^ CrcBuf[i]) & 0xFF ] ^ (crc >> 8);
-    }
+    if ( FastCrc && FastCrcOk ) crc = crcFast( crc, CrcBuf, n );
+    else           crc = crcStandard( crc, CrcBuf, n );
 
   }
 
@@ -1598,25 +1629,32 @@ static int askOverwrite( const char *rel, u32 newSize, u32 oldSize ) {
 
 static void cmdOptions( void ) {
 
-  int w = 62, h = 9;
+  int w = 62, h = 12;
   int x = (SCR_W - w) / 2;
   int y = (25 - h) / 2;
 
   while ( 1 ) {
 
-    char l1[80];
+    char l1[80], l2[80];
 
     dialogFrame( x, y, w, h, "Options" );
 
     sprintf( l1, "[%c]  V = check every download with CRC32", Verify ? 'X' : ' ' );
     putStrPad( x + 3, y + 2, l1, w - 6, A_DLG );
     putStrPad( x + 3, y + 3, "     (slower, but proves the copy on the disk is exact)", w - 6, A_DLG );
-    putStr( x + 3, y + 6, "V = switch      Enter or Esc = close", A_DLGHINT );
+    sprintf( l2, "[%c]  F = fast CRC32 code (for slow CPUs, same result)", FastCrc ? 'X' : ' ' );
+    putStrPad( x + 3, y + 5, l2, w - 6, A_DLG );
+    putStrPad( x + 3, y + 6, "     (switch it off only if you suspect a problem)", w - 6, A_DLG );
+    putStr( x + 3, y + 9, "V, F = switch      Enter or Esc = close", A_DLGHINT );
 
     int k = uiReadKey( );
 
     if ( (k == 'v') || (k == 'V') || (k == ' ') ) {
       Verify = !Verify;
+      saveSettings( );
+    }
+    if ( (k == 'f') || (k == 'F') ) {
+      FastCrc = !FastCrc;
       saveSettings( );
     }
     if ( (k == 13) || (k == 27) ) break;
@@ -2729,6 +2767,9 @@ static void loadSettings( void ) {
     else if ( strncmp( line, "verify=", 7 ) == 0 ) {
       Verify = (line[7] == '1');
     }
+    else if ( strncmp( line, "fastcrc=", 8 ) == 0 ) {
+      FastCrc = (line[8] != '0');
+    }
   }
 
   fclose( f );
@@ -2742,6 +2783,7 @@ static void saveSettings( void ) {
   fprintf( f, "host=%s\n", HostName );
   fprintf( f, "port=%u\n", (unsigned)ServerPort );
   fprintf( f, "verify=%d\n", Verify ? 1 : 0 );
+  fprintf( f, "fastcrc=%d\n", FastCrc ? 1 : 0 );
 
   fclose( f );
 }
