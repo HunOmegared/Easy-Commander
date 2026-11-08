@@ -62,6 +62,8 @@ without a window, and on Linux it always runs in the console:
 
     echost C:\path\to\shared\folder
 
+![The host window](docs/host-window.png)
+
 The host listens on TCP port 6502 (and UDP 6502 for host searches). Only
 connections from private (local network) addresses are accepted. The first
 start on Windows asks whether the firewall may allow it.
