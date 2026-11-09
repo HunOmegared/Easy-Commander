@@ -59,8 +59,11 @@ modern side):
 
 **1. Download.** Get `EC.EXE` (the DOS client) and `echost.exe` (the Windows
 host) from the [latest release](https://github.com/HunOmegared/Easy-Commander/releases/latest).
-On Linux build the host from source (`cd host && go build -o echost`, see
-[docs/BUILDING.md](docs/BUILDING.md)).
+For Linux the release has the host as `echost-linux-amd64.tar.gz` (PC),
+`echost-linux-arm64.tar.gz` and `echost-linux-armv7.tar.gz` (Raspberry Pi and
+similar) and `echost-linux-386.tar.gz`: unpack it and run `./echost /path/to/folder`
+(the Linux version runs in the console, no Go needed). You can also build it
+from source ([docs/BUILDING.md](docs/BUILDING.md)).
 
 **2. Start the host** on the modern PC: run `echost.exe`. Windows asks once
 whether the firewall may allow it: allow it on private networks. It opens a

@@ -12,6 +12,11 @@ program without a console window; the window version needs nothing but Go (no
 extra packages). Without that flag it works too, but a console window is left
 open next to the program window.
 
+The Linux files of a release are built like this (static, no libraries needed;
+`GOARCH` is `amd64`, `arm64`, `arm` with `GOARM=7`, or `386`):
+
+    GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o echost
+
 Cross compiling from a Linux shell:
 
     GOOS=windows GOARCH=amd64 go build -ldflags "-H=windowsgui -s -w" -o echost.exe
