@@ -80,6 +80,16 @@ binaries). The paths below assume mTCP is in `C:\mtcp`, with no spaces in the pa
    The result is `EC.EXE`. `EC` is built in the **large** memory model (`-ml`):
    in the compact model (`-mc`) the code does not fit into one 64 KB segment.
 
+**ECU.EXE, the upload edition.** The same `EC.CPP` built with `-dEC_UPLOAD` can
+also send files to a host that has receiving switched on (F4 = upload mode, F5 =
+Send). It has its own makefile; build it in its own run (the makefile deletes
+the object files first, so the two programs do not mix):
+
+       cd C:\mtcp\src\APPS\EC
+       wmake -f makefile.ecu
+
+The result is `ECU.EXE`. `EC.EXE` stays download-only.
+
 The command line test client is built the same way from `client/ectest/`
 (folder `ECTEST`, `ECTEST.CFG` copied from `NC.CFG`); it fits in the compact
 model.
@@ -94,7 +104,7 @@ configuration (the `MTCPCFG` environment variable, see the mTCP documentation).
 ## Tests
 
 * Host: `cd host && go test` (add `-race` for the data race check)
-* DOS client logic (no DOS needed, Linux or WSL with g++): `sh tests/logic/run.sh`
+* DOS client logic, download and upload edition (no DOS needed, Linux or WSL with g++): `sh tests/logic/run.sh`
 
 ## Line endings
 

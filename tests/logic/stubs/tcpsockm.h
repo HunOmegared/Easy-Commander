@@ -18,6 +18,11 @@ static std::string FH_ROOT="/tmp/fakehost";
 static int FH_BADCRC=0;
 static std::deque<std::vector<uint8_t> > FH_PKTS;
 static int FH_COMMANDS=0;
+// Upload tests: FH_RAW gets every buffer the client sends (as raw bytes) instead of the
+// command parser; FH_OFFER answers OFFER; FH_UPLOAD adds " UPLOAD" to the HELLO answer.
+static void (*FH_RAW)(const uint8_t*,size_t)=0;
+static void (*FH_OFFER)(const std::string&)=0;
+static int FH_UPLOAD=0;
 
 static uint32_t fh_crc(const std::vector<uint8_t>&d){ uint32_t c=0xFFFFFFFFu; for(size_t i=0;i<d.size();i++){ c^=d[i]; for(int k=0;k<8;k++) c=(c&1)?(c>>1)^0xEDB88320u:(c>>1);} return c^0xFFFFFFFFu; }
 static void fh_send(const std::string &hdr,const std::vector<uint8_t>&body){
@@ -42,7 +47,8 @@ static void fh_command(const std::string &cmd){
   FH_COMMANDS++;
   size_t sp=cmd.find(' '); std::string verb=cmd.substr(0,sp), arg=(sp==std::string::npos)?"":cmd.substr(sp+1);
   std::vector<uint8_t> none;
-  if(verb=="HELLO"){ fh_send("OK EASYCOMMANDER 1\r\n",none); return; }
+  if(verb=="HELLO"){ fh_send(FH_UPLOAD?"OK EASYCOMMANDER 1 UPLOAD\r\n":"OK EASYCOMMANDER 1\r\n",none); return; }
+  if(verb=="OFFER"&&FH_OFFER){ FH_OFFER(arg); return; }
   if(verb=="LIST"||verb=="TREE"||verb=="GET"||verb=="CRC"){
     std::vector<std::string> f; { size_t p=0; while(p<arg.size()){ size_t q=arg.find(' ',p); if(q==std::string::npos) q=arg.size(); if(q>p) f.push_back(arg.substr(p,q-p)); p=q+1; } }
     std::string path=f.empty()?"":fh_conv(f[0]); if(path.find("..")!=std::string::npos){ fh_send("ERR 400 Bad request\r\n",none); return; }
@@ -64,7 +70,7 @@ static void fh_command(const std::string &cmd){
 }
 struct Q { void *dequeue(){ if(FH_PKTS.empty()) return 0; std::vector<uint8_t> v=FH_PKTS.front(); FH_PKTS.pop_front(); uint8_t*p=(uint8_t*)malloc(v.size()); memcpy(p,&v[0],v.size()); return p; } };
 struct TcpSocket { Q incoming;
-  int16_t enqueue(TcpBuffer*b){ std::string c((char*)b+sizeof(TcpBuffer),b->len); while(!c.empty()&&(c.back()=='\r'||c.back()=='\n')) c.erase(c.size()-1); fh_command(c); free(b); return 0; }
+  int16_t enqueue(TcpBuffer*b){ if(FH_RAW){ FH_RAW((uint8_t*)b+sizeof(TcpBuffer),b->len); free(b); return 0; } std::string c((char*)b+sizeof(TcpBuffer),b->len); while(!c.empty()&&(c.back()=='\r'||c.back()=='\n')) c.erase(c.size()-1); fh_command(c); free(b); return 0; }
   int8_t connect(uint16_t,IpAddr_t,uint16_t,uint32_t){return 0;} void close(){} bool isRemoteClosed(){return false;} };
 struct TcpSocketMgr { static TcpSocket *getSocket(){ static TcpSocket s; return &s; } static void freeSocket(TcpSocket*){} };
 struct Utils { static int parseEnv(){return 0;} static int initStack(int,int,void(*)(),void(*)()){return 0;}

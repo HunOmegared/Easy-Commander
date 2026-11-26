@@ -15,6 +15,10 @@
    Usage:  EC [host] [port]       (port defaults to 6502; without a host
                                    the program asks for the address)
 
+   Built with -dEC_UPLOAD the program is ECU.EXE: it can also SEND files
+   to a host that has receiving switched on (F4 = upload mode, F5 = Send).
+   EC.EXE (built without it) can only download.
+
    The networking code follows mTCP Netcat:
    mTCP Netcat.cpp, Copyright (C) 2006-2026 Michael B. Brutman
    (mbbrutman@gmail.com), http://www.brutman.com/mTCP
@@ -373,6 +377,10 @@ static IpAddr_t    ServerAddr;
 static uint16_t    ServerPort = 6502;
 static char        HostName[80];
 static Item       *TmpItems;
+#ifdef EC_UPLOAD
+static int         UploadCap = 0;     // the host said "UPLOAD" in its HELLO answer
+static int         UploadMode = 0;    // F4: F5 sends the right panel to the host
+#endif
 
 // Keeps the TCP/IP stack alive; called whenever we wait for something.
 static void pump( void ) {
@@ -569,6 +577,11 @@ static int connectHost( void ) {
     ErrMsg = "that is not an Easy Commander host";
     return 0;
   }
+
+#ifdef EC_UPLOAD
+  UploadCap = (strstr( line, " UPLOAD" ) != NULL);
+  if ( !UploadCap ) UploadMode = 0;
+#endif
 
   Connected = 1;
   return 1;
@@ -954,6 +967,10 @@ static void drawPanel( Panel *p, int x0, int active ) {
   putStrPad( x0 + 1, 22, buf, 38, A_NORMAL );
 
   // Which side this is.
+#ifdef EC_UPLOAD
+  if ( p->remote && UploadMode ) sprintf( buf, " Host %.16s - UPLOAD MODE ", HostName );
+  else
+#endif
   if ( p->remote ) sprintf( buf, " Host %.24s ", HostName );
   else             strcpy( buf, " Local " );
   putStr( x0 + 2, 23, buf, A_BORDER );
@@ -976,6 +993,11 @@ static void drawKeyBar( void ) {
   static const char *normal[10] = {
     "Help", "Reconn", "View", "", "Get", "", "MkDir", "Delete", "Opts", "Quit"
   };
+
+#ifdef EC_UPLOAD
+  normal[3] = UploadMode ? "Down" : "Up";
+  normal[4] = UploadMode ? "Send" : "Get";
+#endif
 
   static const char *withAlt[10] = {
     "Host", "Drive", "", "", "", "", "", "", "", ""
@@ -1467,12 +1489,14 @@ static void drawBar( int x, int y, int w, int pct ) {
   uiFill( x + filled, y, w - filled, 1, B_LIGHT, A_DLG );
 }
 
+static const char *ProgTitle = "Downloading";
+
 static void progressFrame( void ) {
 
   int x = (SCR_W - PW) / 2;
   int y = (25 - PH) / 2;
 
-  dialogFrame( x, y, PW, PH, "Downloading" );
+  dialogFrame( x, y, PW, PH, ProgTitle );
   putStr( x + 3, y + 10, "Esc = cancel (takes effect after the current block)", A_DLGHINT );
 }
 
@@ -2582,6 +2606,648 @@ static void cmdDownload( void ) {
 }
 
 // ---------------------------------------------------------------------
+// Uploading (ECU.EXE only, built with -dEC_UPLOAD).
+//
+// F4 switches upload mode on (the host must have receiving switched on: its
+// HELLO answer ends with UPLOAD).  F5 then offers the selected items of the
+// right (local) panel with OFFER.  If the person at the host agrees, the roles
+// are swapped on the same connection: the HOST asks (TREE \, GET \name off len)
+// and this program answers like a host would, but only for what was offered.
+// The host decides everything (where the files go, what names are accepted,
+// how much it takes).  See docs/PROTOCOL.md.
+
+#ifdef EC_UPLOAD
+
+#define TX_MAX         1400               // buffer size; the payload per packet is MyMTU - 60 at most this
+#define UP_MAX_DEPTH   32
+#define UP_WAIT_MS     75000ul            // the host waits 60 s for its user, WAIT every 5 s
+
+static uint8_t   TxBuf[TX_MAX];
+static uint16_t  TxLen = 0;
+static char      UpLabel[24] = "DOS";
+static FILE     *UpFile = NULL;           // the file being sent (kept open between blocks)
+static char      UpName[130];
+static u32       UpBase;                  // bytes of the files before the current one
+static u32       UpPrevSize;
+static unsigned long UpHostOk, UpHostFailed;   // from the host's END line
+static char      UpAbort[100];            // text of the host's ABORT line
+
+
+// ---- raw sending (data and answers; the same buffer path as sendCommand) ----
+
+static int txFlush( void ) {
+
+  if ( TxLen == 0 ) return 0;
+
+  clockTicks_t start = TIMER_GET_CURRENT( );
+
+  while ( 1 ) {
+
+    Utils::processPackets( );
+
+    DataBuf *buf = (DataBuf *)TcpBuffer::getXmitBuf( );
+
+    if ( buf != NULL ) {
+
+      memcpy( buf->data, TxBuf, TxLen );
+      buf->b.setDataLen( TxLen );
+      TxLen = 0;
+
+      if ( Sock->enqueue( &buf->b ) ) {
+        ErrMsg = "error sending data";
+        return -1;
+      }
+
+      return 0;
+    }
+
+    // No free transmit buffer yet: they come back when the host has acknowledged.
+    if ( CtrlBreakDetected ) { ErrMsg = "Ctrl-Break"; return -1; }
+
+    if ( Timer_diff( start, TIMER_GET_CURRENT( ) ) > TIMER_MS_TO_TICKS( IO_TIMEOUT_MS ) ) {
+      ErrMsg = "timeout while sending";
+      return -1;
+    }
+  }
+}
+
+static int txPut( const void *data, uint16_t n ) {
+
+  const uint8_t *p = (const uint8_t *)data;
+
+  uint16_t chunk = TX_MAX;                   // MyMTU is a variable in mTCP
+  if ( (uint16_t)(MyMTU - 60) < chunk ) chunk = (uint16_t)(MyMTU - 60);
+
+  while ( n > 0 ) {
+
+    uint16_t room = chunk - TxLen;
+    uint16_t c = (n < room) ? n : room;
+
+    memcpy( TxBuf + TxLen, p, c );
+    TxLen += c;
+    p += c;
+    n -= c;
+
+    if ( (TxLen == chunk) && txFlush( ) ) return -1;
+  }
+
+  return 0;
+}
+
+static int txLine( const char *s ) {
+  if ( txPut( s, (uint16_t)strlen( s ) ) ) return -1;
+  return txPut( "\r\n", 2 );
+}
+
+
+// Close the connection for real, so that the host notices (it is waiting for us).
+static void dropConnection( void ) {
+  if ( Sock ) {
+    Sock->close( );
+    TcpSocketMgr::freeSocket( Sock );
+    Sock = NULL;
+  }
+  Connected = 0;
+  RxPos = 0;
+  RxLen = 0;
+}
+
+
+// ---- the list of what is offered ----
+
+// Adds everything below a local folder.  UpDir is its path on the disk, UpRel
+// its name relative to the folder shown in the right panel.  Both are shared
+// (and cut back after every entry) so that the recursion uses little stack.
+// Hidden and system files are included (a backup of a whole disk needs them).
+static char UpDir[200];
+static char UpRel[130];
+static char UpPat[210];
+
+static void appendLocalTree( int depth ) {
+
+  struct find_t fb;
+
+  if ( depth > UP_MAX_DEPTH ) { TreeBad++; return; }
+
+  joinPath( UpPat, UpDir, "*.*" );
+
+  unsigned rc = _dos_findfirst( UpPat, _A_RDONLY | _A_HIDDEN | _A_SYSTEM | _A_ARCH | _A_SUBDIR, &fb );
+
+  while ( rc == 0 ) {
+
+    if ( strcmp( fb.name, "." ) && strcmp( fb.name, ".." ) ) {
+
+      size_t dirLen = strlen( UpDir );
+      size_t relLen = strlen( UpRel );
+
+      if ( ((dirLen + 14) >= sizeof( UpDir )) || ((relLen + 14) >= sizeof( UpRel )) ) {
+        TreeBad++;
+      }
+      else {
+        strcat( UpRel, "\\" );
+        strcat( UpRel, fb.name );
+
+        if ( fb.attrib & _A_SUBDIR ) {
+          addEntry( 'D', UpRel, 0, fb.wr_date, fb.wr_time );
+          strcat( UpDir, "\\" );
+          strcat( UpDir, fb.name );
+          appendLocalTree( depth + 1 );
+          UpDir[dirLen] = 0;
+        }
+        else {
+          addEntry( 'F', UpRel, fb.size, fb.wr_date, fb.wr_time );
+        }
+
+        UpRel[relLen] = 0;
+      }
+    }
+
+    rc = _dos_findnext( &fb );
+  }
+}
+
+// The selected items (or the one under the cursor) of the local panel.
+static void buildLocalList( Panel *p ) {
+
+  TreeUsed = 0;
+  TreeEntries = TreeFiles = TreeDirs = TreeBad = 0;
+  TreeBytes = 0;
+  TreeTooBig = 0;
+
+  u32 bytes;
+  int n = countSelected( p, &bytes );
+
+  for ( int i = 0; i < p->count; i++ ) {
+
+    Item *it = &p->items[i];
+
+    if ( strcmp( it->name, ".." ) == 0 ) continue;
+    if ( (n > 0) ? !it->sel : (i != p->cur) ) continue;
+
+    if ( it->isDir ) {
+
+      addEntry( 'D', it->name, 0, it->date, it->time );
+
+      if ( strlen( p->path ) + 14 < sizeof( UpDir ) ) {
+        joinPath( UpDir, p->path, it->name );
+        strcpy( UpRel, it->name );
+        appendLocalTree( 1 );
+      }
+      else {
+        TreeBad++;
+      }
+    }
+    else {
+      addEntry( 'F', it->name, it->size, it->date, it->time );
+    }
+  }
+}
+
+// Finds an entry of the offered list by its (relative) name.
+static int offerFind( const char *rel, char *type, u32 *size, u16 *date, u16 *time ) {
+
+  uint16_t pos = 0;
+
+  while ( pos < TreeUsed ) {
+
+    const char *name = (const char *)(TreeBuf + pos + ENTRY_HEAD);
+
+    if ( stricmp( name, rel ) == 0 ) {
+      *type = TreeBuf[pos];
+      *size = 0;                       // (on a 32 bit long all four bytes are copied)
+      memcpy( size, TreeBuf + pos + 1, 4 );
+      memcpy( date, TreeBuf + pos + 5, 2 );
+      memcpy( time, TreeBuf + pos + 7, 2 );
+      return 1;
+    }
+
+    pos += ENTRY_HEAD + (uint16_t)strlen( name ) + 1;
+  }
+
+  return 0;
+}
+
+
+// ---- answering the host ----
+
+static void upCloseFile( void ) {
+  if ( UpFile ) { fclose( UpFile ); UpFile = NULL; }
+  UpName[0] = 0;
+}
+
+// The host asked "TREE \": send the whole offered list.
+static int upAnswerTree( void ) {
+
+  char line[200];
+  uint16_t pos = 0;
+
+  sprintf( line, "OK %lu %lu", TreeEntries, (unsigned long)TreeBytes );
+  if ( txLine( line ) ) return -1;
+
+  while ( pos < TreeUsed ) {
+
+    char type = TreeBuf[pos];
+    u32 sz = 0;
+    u16 d, t;
+    memcpy( &sz, TreeBuf + pos + 1, 4 );
+    memcpy( &d, TreeBuf + pos + 5, 2 );
+    memcpy( &t, TreeBuf + pos + 7, 2 );
+    const char *rel = (const char *)(TreeBuf + pos + ENTRY_HEAD);
+    pos += ENTRY_HEAD + (uint16_t)strlen( rel ) + 1;
+
+    unsigned year = (d >> 9) + 1980, month = (d >> 5) & 15, day = d & 31;
+    unsigned hour = t >> 11, minute = (t >> 5) & 63;
+
+    if ( (month < 1) || (month > 12) || (day < 1) || (day > 31) || (hour > 23) || (minute > 59) ) {
+      year = 1980; month = 1; day = 1; hour = 0; minute = 0;
+    }
+
+    sprintf( line, "%c\t%s\t%lu\t%04u%02u%02u\t%02u%02u", type, rel,
+             (type == 'D') ? 0UL : (unsigned long)sz, year, month, day, hour, minute );
+
+    if ( txLine( line ) ) return -1;
+  }
+
+  return txFlush( );
+}
+
+// The host asked "GET \name offset length".  Returns 0, 1 (cancelled by
+// the user: the connection must be dropped) or -1 (connection error).
+static int upAnswerGet( char *arg ) {
+
+  char rel[130];
+  char full[300];
+  char line[80];
+  char type;
+  u32 listed;
+  u16 d, t;
+
+  // arg: "<path> <offset> <length>"
+  char *sp1 = strchr( arg, ' ' );
+  char *sp2 = sp1 ? strchr( sp1 + 1, ' ' ) : NULL;
+
+  if ( (sp1 == NULL) || (sp2 == NULL) ) {
+    return txLine( "ERR 400 Bad request" ) || txFlush( ) ? -1 : 0;
+  }
+
+  *sp1 = 0;
+  *sp2 = 0;
+
+  u32 off = strtoul( sp1 + 1, NULL, 10 );
+  u32 want = strtoul( sp2 + 1, NULL, 10 );
+
+  // Only a name from our own list is served.
+  const char *r = arg;
+  while ( (*r == '\\') || (*r == '/') ) r++;
+
+  if ( strlen( r ) >= sizeof( rel ) ) {
+    return txLine( "ERR 404 Not offered" ) || txFlush( ) ? -1 : 0;
+  }
+
+  strcpy( rel, r );
+  for ( char *c = rel; *c; c++ ) if ( *c == '/' ) *c = '\\';
+
+  if ( !offerFind( rel, &type, &listed, &d, &t ) || (type != 'F') ) {
+    return txLine( "ERR 404 Not offered" ) || txFlush( ) ? -1 : 0;
+  }
+
+  // A new file: progress and open it.
+  if ( stricmp( rel, UpName ) != 0 ) {
+
+    upCloseFile( );
+
+    if ( ProgFileNo > 0 ) UpBase += UpPrevSize;
+    UpPrevSize = listed;
+
+    ProgFileNo++;
+    ProgFileDone = 0;
+    ProgFileSize = listed;
+    strncpy( ProgName, baseOf( rel ), 12 );
+    ProgName[12] = 0;
+    progressUpdate( 1 );
+
+    joinPath( full, Right.path, rel );
+    UpFile = fopen( full, "rb" );
+
+    if ( UpFile == NULL ) {
+      return txLine( "ERR 403 Cannot open the file" ) || txFlush( ) ? -1 : 0;
+    }
+
+    strcpy( UpName, rel );
+  }
+
+  if ( UpFile == NULL ) {
+    return txLine( "ERR 403 Cannot open the file" ) || txFlush( ) ? -1 : 0;
+  }
+
+  fseek( UpFile, 0, SEEK_END );
+  u32 fsize = (u32)ftell( UpFile );
+
+  if ( off >= fsize ) {
+    return txLine( "ERR 400 Past the end of the file" ) || txFlush( ) ? -1 : 0;
+  }
+
+  u32 n = fsize - off;
+  if ( n > want ) n = want;
+  if ( n > DISK_BUF_SIZE ) n = DISK_BUF_SIZE;
+
+  // Read first, answer afterwards: a read error then fails only this file.
+  size_t got = 0;
+
+  if ( fseek( UpFile, (long)off, SEEK_SET ) == 0 ) {
+    got = fread( DiskBuf, 1, (size_t)n, UpFile );
+  }
+
+  if ( got != (size_t)n ) {
+    upCloseFile( );
+    return txLine( "ERR 403 Read error" ) || txFlush( ) ? -1 : 0;
+  }
+
+  sprintf( line, "OK %lu %lu", (unsigned long)n, (unsigned long)fsize );
+
+  if ( txLine( line ) || txPut( DiskBuf, (uint16_t)n ) || txFlush( ) ) return -1;
+
+  ProgFileDone = off + n;
+  ProgDone = UpBase + ProgFileDone;
+  progressUpdate( 0 );
+
+  return ProgCancel ? 1 : 0;
+}
+
+// Plays the "host" for the swapped roles until the host's END or ABORT.
+// Returns 0 (END), 1 (cancelled here), 2 (connection lost), 3 (ABORT, text in UpAbort).
+static int serveOffer( void ) {
+
+  char line[300];
+
+  UpAbort[0] = 0;
+  UpHostOk = UpHostFailed = 0;
+  UpBase = 0;
+  UpPrevSize = 0;
+  UpName[0] = 0;
+  UpFile = NULL;
+
+  while ( 1 ) {
+
+    if ( readLine( line, sizeof( line ) ) < 0 ) {
+      upCloseFile( );
+      Connected = 0;
+      return 2;
+    }
+
+    if ( strnicmp( line, "END", 3 ) == 0 ) {
+      char *p = line + 3;
+      UpHostOk = strtoul( p, &p, 10 );
+      UpHostFailed = strtoul( p, NULL, 10 );
+      upCloseFile( );
+      return 0;
+    }
+
+    if ( strnicmp( line, "ABORT", 5 ) == 0 ) {
+      strncpy( UpAbort, line + ((line[5] == ' ') ? 6 : 5), sizeof( UpAbort ) - 1 );
+      UpAbort[sizeof( UpAbort ) - 1] = 0;
+      upCloseFile( );
+      return 3;
+    }
+
+    int rc = 0;
+
+    if ( strnicmp( line, "TREE", 4 ) == 0 ) {
+      rc = upAnswerTree( );
+    }
+    else if ( strnicmp( line, "GET ", 4 ) == 0 ) {
+      rc = upAnswerGet( line + 4 );
+    }
+    else {
+      // CRC, LIST, anything else: nothing but the offered files is served.
+      rc = (txLine( "ERR 400 Not offered" ) || txFlush( )) ? -1 : 0;
+    }
+
+    if ( rc == -1 ) {
+      upCloseFile( );
+      Connected = 0;
+      return 2;
+    }
+
+    if ( rc == 1 ) {                    // Esc: drop the connection; the host keeps what it has
+      upCloseFile( );
+      dropConnection( );
+      return 1;
+    }
+  }
+}
+
+
+// ---- the commands ----
+
+static void cmdUploadMode( void ) {
+
+  if ( UploadMode ) {
+    UploadMode = 0;
+    Active = 0;
+    return;
+  }
+
+  // Ask the host again: its user may have switched receiving on in the meantime.
+  if ( !ensureConnected( ) ) {
+    uiMessage( "Upload", "Connection problem:", ErrMsg );
+    return;
+  }
+
+  if ( sendCommand( "HELLO" ) ) { Connected = 0; uiMessage( "Upload", "Connection problem:", ErrMsg ); return; }
+
+  char line[100];
+
+  if ( readLine( line, sizeof( line ) ) < 0 ) {
+    Connected = 0;
+    uiMessage( "Upload", "Connection problem:", ErrMsg );
+    return;
+  }
+
+  UploadCap = (strstr( line, " UPLOAD" ) != NULL);
+
+  if ( !UploadCap ) {
+    uiMessage( "Upload", "This host does not receive files (right now).",
+               "Switch on \"Start receiving\" in the host window." );
+    return;
+  }
+
+  UploadMode = 1;
+  Active = 1;                      // the files to send are in the local (right) panel
+}
+
+// Waits for the host's answer to OFFER.  The host sends WAIT every 5 seconds
+// while its user is asked.  Returns 1 = OK, 0 = refused (ErrMsg), -1 = connection
+// problem, -2 = cancelled with Esc (connection dropped).
+static int waitOfferAnswer( void ) {
+
+  char line[200];
+  int x = 12, y = 10, w = 56;
+
+  dialogFrame( x, y, w, 5, "Send" );
+  putStr( x + 3, y + 2, "Waiting for the person at the host...", A_DLG );
+  putStr( x + 3, y + 3, "Esc = cancel", A_DLGHINT );
+
+  clockTicks_t start = TIMER_GET_CURRENT( );
+
+  while ( 1 ) {
+
+    if ( kbhit( ) && (uiReadKey( ) == 27) ) {
+      dropConnection( );                 // the host sees the connection close
+      return -2;
+    }
+
+    // A short look at the socket, so that Esc is noticed quickly.
+    int16_t n = fillRx( );
+
+    if ( n == -1 ) { ErrMsg = "connection closed by host"; Connected = 0; return -1; }
+    if ( n == -2 ) { ErrMsg = "Ctrl-Break"; Connected = 0; return -1; }
+
+    if ( RxPos < RxLen ) {
+
+      if ( readLine( line, sizeof( line ) ) < 0 ) { Connected = 0; return -1; }
+
+      if ( strnicmp( line, "WAIT", 4 ) == 0 ) {
+        start = TIMER_GET_CURRENT( );
+        continue;
+      }
+
+      if ( strcmp( line, "OK" ) == 0 ) return 1;
+
+      strncpy( HostMsg, line, sizeof( HostMsg ) - 1 );
+      HostMsg[sizeof( HostMsg ) - 1] = 0;
+      ErrMsg = HostMsg;
+      return 0;
+    }
+
+    if ( Timer_diff( start, TIMER_GET_CURRENT( ) ) > TIMER_MS_TO_TICKS( UP_WAIT_MS ) ) {
+      ErrMsg = "timeout";
+      Connected = 0;
+      return -1;
+    }
+  }
+}
+
+static void cmdSend( void ) {
+
+  if ( Active != 1 ) {
+    uiMessage( "Send", "Select files in the right (local) panel,", "then press F5." );
+    return;
+  }
+
+  buildLocalList( &Right );
+
+  if ( TreeTooBig ) {
+    uiMessage( "Send", "That is too many files for one go.", "Select fewer folders at a time." );
+    return;
+  }
+
+  if ( TreeFiles == 0 ) {
+    uiMessage( "Send", "Nothing to send (no files).", NULL );
+    return;
+  }
+
+  if ( !ensureConnected( ) ) {
+    uiMessage( "Send", "Connection problem:", ErrMsg );
+    return;
+  }
+
+  // The label becomes the name of the folder on the host.
+  {
+    char prompt[70];
+    sprintf( prompt, "%lu file(s), %lu bytes. Name on the host:", TreeFiles, (unsigned long)TreeBytes );
+
+    if ( !inputBox( "Send to the host", prompt, UpLabel, 20 ) ) return;
+
+    // Letters, digits, - and _ only: anything else would be refused.
+    char *o = UpLabel;
+    for ( char *c = UpLabel; *c; c++ ) {
+      if ( isalnum( (unsigned char)*c ) || (*c == '-') || (*c == '_') ) *o++ = *c;
+    }
+    *o = 0;
+    if ( UpLabel[0] == 0 ) strcpy( UpLabel, "DOS" );
+  }
+
+  char cmd[100];
+  sprintf( cmd, "OFFER %lu %lu %s", TreeFiles, (unsigned long)TreeBytes, UpLabel );
+
+  CtrlBreakDetected = 0;
+
+  if ( sendCommand( cmd ) ) {
+    Connected = 0;
+    uiMessage( "Send", "Connection problem:", ErrMsg );
+    return;
+  }
+
+  int a = waitOfferAnswer( );
+
+  if ( a == -2 ) { drawAll( ); return; }
+
+  if ( a != 1 ) {
+    uiMessage( "Send", (a == -1) ? "Connection problem:" : "The host says:", ErrMsg );
+    return;
+  }
+
+  // The host agreed: now it asks and we answer.
+  ProgTitle = "Sending";
+  ProgTotal = TreeBytes;
+  ProgDone = 0;
+  ProgFileDone = 0;
+  ProgFileSize = 0;
+  ProgFileNo = 0;
+  ProgFileCount = TreeFiles;
+  ProgCancel = 0;
+  ProgPhase = 0;
+  ProgName[0] = 0;
+  ProgStart = uiTicks( );
+  ProgLast = 0;
+
+  progressFrame( );
+  progressUpdate( 1 );
+
+  int res = serveOffer( );
+
+  ProgTitle = "Downloading";
+
+  {
+    u32 ms = (u32)(uiTicks( ) - ProgStart) * 55;
+    char s1[90], s2[90], s3[100];
+    const char *lines[4];
+    int nl = 0;
+
+    if ( res == 0 ) {
+      sprintf( s1, "Received by the host: %lu   Failed: %lu", UpHostOk, UpHostFailed );
+    }
+    else if ( res == 1 ) {
+      strcpy( s1, "Cancelled. The host keeps what it already received." );
+    }
+    else if ( res == 3 ) {
+      sprintf( s1, "The host stopped it: %.60s", UpAbort );
+    }
+    else {
+      sprintf( s1, "Connection lost: %.60s", ErrMsg );
+    }
+    lines[nl++] = s1;
+
+    sprintf( s2, "%lu bytes in %lu.%01lu s", (unsigned long)ProgDone,
+             (unsigned long)(ms / 1000), (unsigned long)((ms % 1000) / 100) );
+    lines[nl++] = s2;
+
+    if ( (res == 0) && UpHostFailed ) {
+      sprintf( s3, "See ECINBOX.LOG in the folder \"%.20s_...\" on the host.", UpLabel );
+      lines[nl++] = s3;
+    }
+
+    uiDialog( (res == 0) ? "Done" : (res == 1) ? "Cancelled" : "Stopped", lines, nl, 0 );
+  }
+
+  selectAll( &Right, 0 );
+}
+
+#endif    // EC_UPLOAD
+
+
+// ---------------------------------------------------------------------
 // Deleting (only in the local panel: the host is read-only)
 
 #define ALL_ATTRS      ( _A_RDONLY | _A_HIDDEN | _A_SYSTEM | _A_ARCH | _A_SUBDIR )
@@ -3351,7 +4017,7 @@ static unsigned freeMemKB( void ) {
 
 static void cmdHelp( void ) {
 
-  const char *lines[15];
+  const char *lines[16];
   char memLine[80];
 
   lines[0]  = "Up/Down/PgUp/PgDn/Home/End   move the cursor";
@@ -3372,7 +4038,14 @@ static void cmdHelp( void ) {
   sprintf( memLine, "Free memory now: %u KB (compare with MEM before EC)", freeMemKB( ) );
   lines[14] = memLine;
 
+#ifdef EC_UPLOAD
+  lines[13] = "F4          upload mode: F5 then SENDS the right panel to the host";
+  lines[14] = "Ctrl+O      look at the DOS screen (any key returns)";
+  lines[15] = memLine;
+  uiDialog( "Easy Commander - help", lines, 16, 0 );
+#else
   uiDialog( "Easy Commander - help", lines, 15, 0 );
+#endif
 }
 
 // Ctrl+O: show the DOS screen (with the start text) until a key is pressed.
@@ -3497,7 +4170,12 @@ static void handleKey( int k ) {
 
     case K_F3:   cmdView( ); break;
     case K_CTRL_O: cmdDosScreen( ); break;
+#ifdef EC_UPLOAD
+    case K_F4:   cmdUploadMode( ); break;
+    case K_F5:   if ( UploadMode ) cmdSend( ); else cmdDownload( ); break;
+#else
     case K_F5:   cmdDownload( ); break;
+#endif
     case K_F7:   cmdMakeDir( ); break;
     case K_F8:   cmdDelete( ); break;
 
@@ -3609,7 +4287,11 @@ static void endProgram( int rc ) {
 
 int main( int argc, char *argv[] ) {
 
+#ifdef EC_UPLOAD
+  printf( "Easy Commander 1.0 (upload edition), Copyright (C) 2026 Daniel Szentmiklosi.\n" );
+#else
   printf( "Easy Commander 1.0, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
+#endif
   printf( "Free software, GPLv3 or later. Built " __DATE__ ".\n\n" );
 
   setIniPath( argv[0] );

@@ -25,11 +25,15 @@ mkdir -p "$B"
 #include <unistd.h>
 #include <string.h>
 #define stricmp strcasecmp
+#define strnicmp strncasecmp
 HEAD
   tr -d "\r" < "$HERE/../../client/ec/EC.CPP"
 } > "$B/ec_check.cpp"
 
 status=0
+echo "=== t_upload (EC_UPLOAD) ==="
+g++ -std=gnu++11 -w -DEC_UPLOAD -I"$HERE/stubs" -I"$B" -o "$B/t_upload" "$HERE/t_upload.cpp"
+timeout 60 "$B/t_upload" || status=1
 for t in t_download t_local t_discovery t_crc t_view t_mask; do
   echo "=== $t ==="
   g++ -std=gnu++11 -w -I"$HERE/stubs" -I"$B" -o "$B/$t" "$HERE/$t.cpp"
