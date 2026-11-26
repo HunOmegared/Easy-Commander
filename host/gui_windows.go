@@ -3,7 +3,8 @@
 package main
 
 // The window version of the host (Windows only): a small window with the
-// shared folder, name and port, a Start/Stop button, the address to type into
+// shared folder, name and port, a Start/Stop button, the inbox (receiving what the
+// DOS client sends) with its own Start/Stop button, the address to type into
 // the DOS client and a list of what the clients do. Closing the window hides
 // it in the notification area (tray); "Exit" in the tray menu ends the program.
 //
@@ -16,6 +17,7 @@ package main
 // as the console version.
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -73,9 +75,11 @@ var (
 	pRegisterWindowMessageW = user32.NewProc("RegisterWindowMessageW")
 	pCreateIconIndirect     = user32.NewProc("CreateIconIndirect")
 	pSetProcessDPIAware     = user32.NewProc("SetProcessDPIAware")
+	pEnumThreadWindows      = user32.NewProc("EnumThreadWindows")
 	pGetDC                  = user32.NewProc("GetDC")
 	pReleaseDC              = user32.NewProc("ReleaseDC")
 	pGetModuleHandleW       = kernel32.NewProc("GetModuleHandleW")
+	pGetCurrentThreadID     = kernel32.NewProc("GetCurrentThreadId")
 	pCreateMutexW           = kernel32.NewProc("CreateMutexW")
 	pFreeConsole            = kernel32.NewProc("FreeConsole")
 	pAttachConsole          = kernel32.NewProc("AttachConsole")
@@ -152,9 +156,18 @@ const (
 	idcArrow     = 32512
 	idiApp       = 32512
 
-	mbOK        = 0x00000000
-	mbIconError = 0x00000010
-	mbIconInfo  = 0x00000040
+	mbOK            = 0x00000000
+	mbYesNo         = 0x00000004
+	mbIconError     = 0x00000010
+	mbIconQuestion  = 0x00000020
+	mbIconWarning   = 0x00000030
+	mbIconInfo      = 0x00000040
+	mbDefButton2    = 0x00000100
+	mbSetForeground = 0x00010000
+	mbTopmost       = 0x00040000
+
+	idYes = 6
+	idNo  = 7
 )
 
 // control and menu numbers
@@ -168,9 +181,16 @@ const (
 	idHide   = 106
 	idExit   = 107
 
+	idInBrowse = 109
+	idInFolder = 110
+	idQuota    = 111
+	idAsk      = 112
+	idRxStart  = 113
+
 	idTrayOpen   = 201
 	idTrayToggle = 202
 	idTrayExit   = 203
+	idTrayRx     = 204
 
 	timerID = 1
 )
@@ -303,10 +323,14 @@ var (
 	hEdPort, hBtnBrowse      uintptr
 	hBtnStart, hLblStatus    uintptr
 	hLblIPs, hList, hChkHide uintptr
+	hEdInbox, hBtnInBrowse   uintptr
+	hEdQuota, hChkAsk        uintptr
+	hBtnRx, hLblRx           uintptr
 
 	dpi               = 96
 	msgTaskbarCreated uintptr
 	lastStatus        string
+	lastRxStatus      string
 	lastIPs           string
 )
 
@@ -329,6 +353,11 @@ func getText(h uintptr) string {
 
 func msgBox(text string, flags uintptr) {
 	call(pMessageBoxW, hMain, wstr(text), wstr(windowTitle), flags)
+}
+
+// askBox is a message box with an answer: it returns the button number.
+func askBox(text string, flags uintptr) int {
+	return int(call(pMessageBoxW, hMain, wstr(text), wstr(windowTitle), flags))
 }
 
 func control(class, text string, style, exStyle uint32, x, y, w, h, id int) uintptr {
@@ -450,6 +479,11 @@ func trayMenu() {
 	}
 	call(pAppendMenuW, menu, mfString, idTrayOpen, wstr("Open window"))
 	call(pAppendMenuW, menu, mfString, idTrayToggle, wstr(toggle))
+	rxToggle := "Start receiving"
+	if host.Receiving() {
+		rxToggle = "Stop receiving"
+	}
+	call(pAppendMenuW, menu, mfString, idTrayRx, wstr(rxToggle))
 	call(pAppendMenuW, menu, mfSeparator, 0, 0)
 	call(pAppendMenuW, menu, mfString, idTrayExit, wstr("Exit"))
 
@@ -480,26 +514,59 @@ func createControls() {
 	hBtnStart = control("BUTTON", "Start sharing", bsPushButton|wsTabStop, 0, 12, 128, 140, 30, idStart)
 	hLblStatus = control("STATIC", "", ssNoPrefix, 0, 168, 135, 300, 20, 0)
 
-	control("STATIC", "Address to type into the DOS client:", ssNoPrefix, 0, 12, 172, 456, 18, 0)
-	hLblIPs = control("STATIC", "", ssNoPrefix, 0, 12, 192, 456, 40, 0)
+	control("STATIC", "Inbox folder (what the DOS client sends arrives here):", ssNoPrefix, 0, 12, 176, 456, 18, 0)
+	hEdInbox = control("EDIT", "", esAutoHScroll|wsTabStop, wsExClientEdge, 12, 196, 372, 24, idInFolder)
+	call(pSendMessageW, hEdInbox, emSetLimit, 259, 0)
+	hBtnInBrowse = control("BUTTON", "Browse...", bsPushButton|wsTabStop, 0, 392, 195, 76, 26, idInBrowse)
 
-	control("STATIC", "Activity:", ssNoPrefix, 0, 12, 236, 456, 18, 0)
-	hList = control("LISTBOX", "", wsVScroll|lbsNoIntegral, wsExClientEdge, 12, 256, 456, 92, 0)
+	control("STATIC", "Quota (like 500 MB or 4 GB, 0 = no limit):", ssNoPrefix, 0, 12, 232, 250, 18, 0)
+	hEdQuota = control("EDIT", "", esAutoHScroll|wsTabStop, wsExClientEdge, 12, 252, 120, 24, idQuota)
+	call(pSendMessageW, hEdQuota, emSetLimit, 20, 0)
+	hChkAsk = control("BUTTON", "Ask me before every transfer", bsAutoCheckbox|wsTabStop, 0, 160, 254, 250, 22, idAsk)
 
-	hChkHide = control("BUTTON", "Start hidden in the tray", bsAutoCheckbox|wsTabStop, 0, 12, 360, 230, 22, idHidden)
-	control("BUTTON", "Hide to tray", bsPushButton|wsTabStop, 0, 270, 356, 100, 28, idHide)
-	control("BUTTON", "Exit", bsPushButton|wsTabStop, 0, 378, 356, 90, 28, idExit)
+	hBtnRx = control("BUTTON", "Start receiving", bsPushButton|wsTabStop, 0, 12, 292, 140, 30, idRxStart)
+	hLblRx = control("STATIC", "", ssNoPrefix, 0, 168, 299, 300, 20, 0)
+
+	control("STATIC", "Address to type into the DOS client:", ssNoPrefix, 0, 12, 336, 456, 18, 0)
+	hLblIPs = control("STATIC", "", ssNoPrefix, 0, 12, 356, 456, 40, 0)
+
+	control("STATIC", "Activity:", ssNoPrefix, 0, 12, 400, 456, 18, 0)
+	hList = control("LISTBOX", "", wsVScroll|lbsNoIntegral, wsExClientEdge, 12, 420, 456, 92, 0)
+
+	hChkHide = control("BUTTON", "Start hidden in the tray", bsAutoCheckbox|wsTabStop, 0, 12, 524, 230, 22, idHidden)
+	control("BUTTON", "Hide to tray", bsPushButton|wsTabStop, 0, 270, 520, 100, 28, idHide)
+	control("BUTTON", "Exit", bsPushButton|wsTabStop, 0, 378, 520, 90, 28, idExit)
 }
 
 func statusText() string {
-	if !host.Running() {
-		return "Stopped"
+	share := "Stopped"
+	if host.Running() {
+		n := host.Clients()
+		if n == 1 {
+			share = "Sharing - 1 client connected"
+		} else {
+			share = fmt.Sprintf("Sharing - %d clients connected", n)
+		}
 	}
-	n := host.Clients()
-	if n == 1 {
-		return "Sharing - 1 client connected"
+	if host.Receiving() {
+		if host.Running() {
+			return share + "; receiving"
+		}
+		return "Receiving"
 	}
-	return fmt.Sprintf("Sharing - %d clients connected", n)
+	return share
+}
+
+func rxStatusText() string {
+	switch {
+	case !host.Receiving():
+		return "Not receiving"
+	case host.ReceiveBusy():
+		return "Receiving - a transfer is running"
+	case host.ReceiveAsks():
+		return "Receiving - asks before every transfer"
+	}
+	return "Receiving - without asking"
 }
 
 func ipText() string {
@@ -526,6 +593,30 @@ func refresh() {
 	call(pEnableWindow, hEdName, en)
 	call(pEnableWindow, hEdPort, en)
 	call(pEnableWindow, hBtnBrowse, en)
+
+	rx := host.Receiving()
+	if rx {
+		setText(hBtnRx, "Stop receiving")
+	} else {
+		setText(hBtnRx, "Start receiving")
+	}
+	enRx := uintptr(1)
+	if rx {
+		enRx = 0
+	}
+	call(pEnableWindow, hEdInbox, enRx)
+	call(pEnableWindow, hBtnInBrowse, enRx)
+	call(pEnableWindow, hEdQuota, enRx)
+	call(pEnableWindow, hChkAsk, enRx)
+	// the port and the name belong to the open ports: fixed while either is on
+	if running || rx {
+		call(pEnableWindow, hEdName, 0)
+		call(pEnableWindow, hEdPort, 0)
+	}
+	if s := rxStatusText(); s != lastRxStatus {
+		lastRxStatus = s
+		setText(hLblRx, s)
+	}
 
 	if s := statusText(); s != lastStatus {
 		lastStatus = s
@@ -570,12 +661,12 @@ func showWindow() {
 	refresh()
 }
 
-func browseFolder() {
+func browseFolder(target uintptr, title string) {
 	display := make([]uint16, 260)
 	bi := browseInfo{
 		hwndOwner:      hMain,
 		pszDisplayName: &display[0],
-		lpszTitle:      wstr("Choose the folder to share"),
+		lpszTitle:      wstr(title),
 		ulFlags:        0x0001 | 0x0010 | 0x0040, // folders only, edit box, new style
 	}
 	pidl := call(pSHBrowseForFolderW, unsafe.Pointer(&bi))
@@ -584,7 +675,7 @@ func browseFolder() {
 	}
 	path := make([]uint16, 520)
 	if call(pSHGetPathFromIDListW, pidl, unsafe.Pointer(&path[0])) != 0 {
-		setText(hEdFolder, syscall.UTF16ToString(path))
+		setText(target, syscall.UTF16ToString(path))
 	}
 	call(pCoTaskMemFree, pidl)
 }
@@ -596,12 +687,17 @@ func saveSettings() {
 		cfg.Port = n
 	}
 	cfg.Hidden = call(pSendMessageW, hChkHide, bmGetCheck, 0, 0) == 1
+	cfg.InDir = strings.TrimSpace(getText(hEdInbox))
+	if mb, err := parseQuotaText(getText(hEdQuota)); err == nil {
+		cfg.QuotaMB = mb
+	}
+	cfg.Ask = call(pSendMessageW, hChkAsk, bmGetCheck, 0, 0) == 1
 	saveConfig(cfgPath, cfg)
 }
 
 func toggleHost() {
 	if host.Running() {
-		host.Stop()
+		host.StopSharing()
 		logf("Stopped sharing")
 		refresh()
 		return
@@ -611,11 +707,114 @@ func toggleHost() {
 		msgBox("The port must be a number from 1 to 65535.", mbOK|mbIconError)
 		return
 	}
+	if host.Receiving() {
+		port = host.Port // the ports are open already (for receiving)
+	}
 	if err := host.Start(getText(hEdFolder), port, strings.TrimSpace(getText(hEdName))); err != nil {
 		msgBox(err.Error(), mbOK|mbIconError)
 		return
 	}
 	announceStart()
+	saveSettings()
+	refresh()
+}
+
+// The question about an incoming transfer. It comes from a connection's own
+// goroutine, so the box gets a thread of its own, and when the host stops
+// waiting (ctx is done) the box is closed by "pressing No" in it.
+var closeBoxCallback = syscall.NewCallback(func(hwnd, lparam uintptr) uintptr {
+	call(pPostMessageW, hwnd, wmCommand, idNo, 0)
+	return 1
+})
+
+func guiConfirm(ctx context.Context, info OfferInfo) bool {
+	text := fmt.Sprintf("%s wants to send %d files (%s).\n\nThey will go into the new folder\n%s\n\n",
+		info.Remote, info.Files, humanBytes(info.Bytes), filepath.Join(host.InboxDir, info.Dest))
+	if info.Free >= 0 {
+		text += "Free disk space: " + humanBytes(info.Free) + "\n"
+	}
+	text += "In the inbox now: " + humanBytes(info.Used)
+	if info.Quota > 0 {
+		text += " of the " + humanBytes(info.Quota) + " quota"
+	}
+	text += "\n\nAccept?"
+
+	done := make(chan bool, 1)
+	tid := make(chan uint32, 1)
+	go func() {
+		runtime.LockOSThread() // the box lives and dies with this thread
+		tid <- uint32(call(pGetCurrentThreadID))
+		r := call(pMessageBoxW, 0, wstr(text), wstr("Easy Commander host - incoming files"),
+			mbYesNo|mbIconQuestion|mbDefButton2|mbTopmost|mbSetForeground)
+		done <- r == idYes
+	}()
+	t := <-tid
+	select {
+	case yes := <-done:
+		return yes
+	case <-ctx.Done():
+		for i := 0; i < 25; i++ { // the box may not be on the screen yet
+			call(pEnumThreadWindows, t, closeBoxCallback, 0)
+			select {
+			case <-done:
+				return false
+			case <-time.After(200 * time.Millisecond):
+			}
+		}
+		return false
+	}
+}
+
+func toggleReceiving() {
+	if host.Receiving() {
+		host.StopReceiving()
+		logf("Stopped receiving")
+		refresh()
+		return
+	}
+	dir := strings.TrimSpace(getText(hEdInbox))
+	if dir == "" {
+		msgBox("Choose the inbox folder first.", mbOK|mbIconError)
+		return
+	}
+	mb, err := parseQuotaText(getText(hEdQuota))
+	if err != nil {
+		msgBox("The quota must be a size like 500 MB or 4 GB (0 = no limit).", mbOK|mbIconError)
+		return
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(getText(hEdPort)))
+	if host.Running() {
+		port, err = host.Port, nil
+	}
+	if err != nil || port < 1 || port > 65535 {
+		msgBox("The port must be a number from 1 to 65535.", mbOK|mbIconError)
+		return
+	}
+	ask := call(pSendMessageW, hChkAsk, bmGetCheck, 0, 0) == 1
+
+	if !ask {
+		q := "without any limit (only the free disk space)"
+		if mb > 0 {
+			q = "up to " + quotaText(mb)
+		}
+		text := "You are about to receive WITHOUT being asked.\n\n" +
+			"Every computer in your network can then put files into\n" + dir + "\n" +
+			q + ", until you press Stop receiving.\n\n" +
+			"Received files are never run, but treat them as untrusted.\n\nStart receiving?"
+		if askBox(text, mbYesNo|mbIconWarning|mbDefButton2) != idYes {
+			return
+		}
+	}
+
+	icfg := InboxConfig{Dir: dir, Quota: int64(mb) << 20, Reserve: defaultReserve, Ask: ask}
+	if err := host.StartReceiving(port, strings.TrimSpace(getText(hEdName)), icfg, guiConfirm); err != nil {
+		msgBox(err.Error(), mbOK|mbIconError)
+		return
+	}
+	logf("Receiving into %s (quota %s, %s)", host.InboxDir, quotaText(mb), map[bool]string{true: "asks before every transfer", false: "without asking"}[ask])
+	if host.DiscoveryErr != nil {
+		logf("Host search is off (UDP port %d: %v)", host.Port, host.DiscoveryErr)
+	}
 	saveSettings()
 	refresh()
 }
@@ -636,9 +835,15 @@ func exitProgram() {
 func onCommand(id int) {
 	switch id {
 	case idBrowse:
-		browseFolder()
+		browseFolder(hEdFolder, "Choose the folder to share")
+	case idInBrowse:
+		browseFolder(hEdInbox, "Choose the inbox folder")
 	case idStart, idTrayToggle:
 		toggleHost()
+	case idRxStart, idTrayRx:
+		toggleReceiving()
+	case idAsk:
+		saveSettings()
 	case idHidden:
 		saveSettings()
 	case idHide:
@@ -779,7 +984,7 @@ func runGUI(o options) {
 	}
 
 	style := uint32(wsOverlapped | wsCaption | wsSysMenu | wsMinimizeBox)
-	r := rect{0, 0, int32(sc(480)), int32(sc(396))}
+	r := rect{0, 0, int32(sc(480)), int32(sc(560))}
 	call(pAdjustWindowRectEx, unsafe.Pointer(&r), style, 0, 0)
 	w, h := int(r.right-r.left), int(r.bottom-r.top)
 	x := (int(call(pGetSystemMetrics, 0)) - w) / 2
@@ -799,6 +1004,14 @@ func runGUI(o options) {
 		setText(hEdName, sanitizeName(hn)) // what clients see unless it is changed
 	}
 	setText(hEdPort, strconv.Itoa(cfg.Port))
+	if cfg.InDir == "" {
+		cfg.InDir = filepath.Join(exeDir, "inbox") // only a suggestion: nothing is created before Start receiving
+	}
+	setText(hEdInbox, cfg.InDir)
+	setText(hEdQuota, quotaText(cfg.QuotaMB))
+	if cfg.Ask {
+		call(pSendMessageW, hChkAsk, bmSetCheck, 1, 0)
+	}
 	if cfg.Hidden {
 		call(pSendMessageW, hChkHide, bmSetCheck, 1, 0)
 	}

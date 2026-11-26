@@ -37,6 +37,15 @@ computer name) and, on Windows, `-console` (no window; output goes to the
 console the program was started from). In the window version the same options
 override the saved settings (`echost.ini` next to the program).
 
+Receiving (the other direction, see `docs/PROTOCOL.md`, command `OFFER`) is off
+until it is switched on: in the window with "Start receiving" (inbox folder,
+quota, "Ask me before every transfer"), in the console with `-inbox <folder>`.
+Console options for it: `-quota 4G` (most the inbox may hold; `0` = only the free
+disk space limits), `-reserve 1G` (free space that must remain), `-no-ask` (do
+not ask before every transfer; you confirm once at the start, or give `-yes`),
+`-allow 172.20.0.0/16` (more networks that may send; by default only the networks
+of the computer's own interfaces and loopback), `-no-share` (receive only).
+
 ## DOS client (Open Watcom 1.9 + mTCP source)
 
 Use **Open Watcom 1.9** (recommended; it is what the mTCP author uses). The Open
@@ -84,7 +93,7 @@ configuration (the `MTCPCFG` environment variable, see the mTCP documentation).
 
 ## Tests
 
-* Host: `cd host && go test`
+* Host: `cd host && go test` (add `-race` for the data race check)
 * DOS client logic (no DOS needed, Linux or WSL with g++): `sh tests/logic/run.sh`
 
 ## Line endings

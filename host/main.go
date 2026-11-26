@@ -12,6 +12,8 @@
 //	                    listed before their contents; empty folders included
 //	CRC <path>       -> OK <size> <crc32 as 8 hex digits>   (files only)
 //	QUIT             -> OK Bye
+//	OFFER <files> <bytes> [label]
+//	                 -> the other direction, see receive.go and docs/PROTOCOL.md
 //
 // Discovery (UDP, same port number): "ECDISC 1" is answered with
 // "ECHOST 1 <tcp port> <name>".
@@ -231,6 +233,15 @@ func dosStamp(t time.Time) (string, string) {
 
 type server struct {
 	root string
+	host *Host // set by the running host; the tests use root alone
+}
+
+// shareDir is the shared folder, "" while sharing is off.
+func (s *server) shareDir() string {
+	if s.host != nil {
+		return s.host.shareDir()
+	}
+	return s.root
 }
 
 // resolve turns a client (DOS-name) path into a real path below root.
@@ -544,16 +555,37 @@ func (s *server) handle(conn net.Conn) {
 
 		switch cmd {
 		case "HELLO":
-			fmt.Fprintf(w, "OK EASYCOMMANDER %d\r\n", protoVersion)
+			fmt.Fprintf(w, "OK EASYCOMMANDER %d", protoVersion)
+			if s.host != nil && s.host.uploadFor(conn.RemoteAddr()) {
+				fmt.Fprint(w, " UPLOAD")
+			}
+			fmt.Fprint(w, "\r\n")
 			w.Flush()
-		case "LIST":
-			s.cmdList(w, arg)
-		case "TREE":
-			s.cmdTree(w, arg)
-		case "CRC":
-			s.cmdCRC(w, arg)
-		case "GET":
-			if !s.cmdGet(conn, w, arg) {
+		case "LIST", "TREE", "CRC", "GET":
+			root := s.shareDir()
+			if root == "" {
+				writeErr(w, errNoShare)
+				break
+			}
+			sv := &server{root: root}
+			switch cmd {
+			case "LIST":
+				sv.cmdList(w, arg)
+			case "TREE":
+				sv.cmdTree(w, arg)
+			case "CRC":
+				sv.cmdCRC(w, arg)
+			case "GET":
+				if !sv.cmdGet(conn, w, arg) {
+					return
+				}
+			}
+		case "OFFER":
+			if s.host == nil {
+				writeErr(w, errNoUpload)
+				break
+			}
+			if !s.host.handleOffer(conn, r, w, arg) {
 				return
 			}
 		case "QUIT":

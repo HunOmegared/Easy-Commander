@@ -53,6 +53,66 @@ state.
 
 CRC-32 (IEEE 802.3, the one used by zip) of the whole file.
 
+### `OFFER <files> <bytes> [label]`
+
+The other direction (the DOS client sends, the host receives). Only works while
+the person at the host has switched receiving on, and only for clients in the
+host's own network. `HELLO` tells a client that it may try: the answer ends with
+` UPLOAD`:
+
+    OK EASYCOMMANDER 1 UPLOAD
+
+`<files>` and `<bytes>` are the number of files and their total size, `label`
+(letters, digits, `_`, `-`, up to 20) names the folder the files arrive in.
+
+    WAIT                         (every 5 seconds while somebody at the host is asked)
+    OK                           the host agrees
+    ERR <code> <message>         it does not (see below)
+
+After `OK` the **roles are swapped on the same connection**: the host is the
+downloader and sends commands, the client answers exactly like a host would, but
+only for what it offered, and the offered files are the root (`\`):
+
+    host:    TREE \
+    client:  OK <entries> <total size>, then the entries (as for TREE)
+    host:    GET \<path> <offset> <length>        (blocks of 16 KB)
+    client:  OK <n> <filesize>, then n bytes       or   ERR <code> <message>
+    ...
+    host:    END <files received> <files failed>        or   ABORT <message>
+
+`END` or `ABORT` is the last line of the host: the connection is a normal one
+again and the client may send the next command. A client answers `ERR` to a
+request for anything it did not offer. `ERR` for one `GET` (for example a read
+error on the client's disk) fails only that file; the host keeps what it
+received as `NAME.EXT.part` and goes on with the next file.
+
+Everything is decided on the host, and nothing the client says is trusted:
+
+* The files go into a new folder `<label>_<YYYYMMDD>_<HHMM>` below the inbox
+  folder (never into the shared folder, never over an existing file or folder).
+* Every name must be a plain 8.3 name: no `..`, no separators, no device names
+  (`CON`, `NUL`, `COM1` ...). A folder must be listed before its contents. A
+  list that breaks a rule ends the transfer with `ABORT`.
+* A file is written as `NAME.EXT.part` and renamed when it is complete; the date
+  and time from the list are set on it. A report `ECINBOX.LOG` is written into
+  the folder.
+* The number of files and bytes may not exceed what was offered.
+* The offer is refused before anyone is asked when the inbox would exceed its
+  quota, or when less than a reserve (1 GB) of free disk space would remain.
+* One transfer at a time; every wait has a time limit.
+
+Errors of `OFFER`:
+
+| Code | Meaning |
+|---|---|
+| 400 | bad numbers |
+| 401 | the person at the host said no |
+| 403 | receiving is off, or the client is not in the host's network |
+| 408 | nobody at the host answered in time (60 seconds) |
+| 409 | another transfer is running |
+| 500 | the folder could not be created |
+| 507 | over the quota, or not enough free disk space |
+
 ### `QUIT`
 
     OK Bye
@@ -83,7 +143,7 @@ by hand.
 | Code | Meaning |
 |---|---|
 | 400 | bad request, unknown command, bad number, `..` in a path |
-| 403 | file cannot be opened / folder cannot be read |
+| 403 | file cannot be opened / folder cannot be read / sharing is off |
 | 404 | no such file or folder |
 | 405 | not a folder (LIST/TREE on a file) |
 | 406 | is a folder (GET/CRC on a folder; use TREE) |
@@ -107,7 +167,12 @@ the next command. An idle connection is closed by the host after 10 minutes.
 
 ## Safety
 
-The host is read-only, accepts connections only from private, loopback and
-link-local addresses, and a client can never leave the shared folder: every
-path component must match a name the host listed. There is no encryption and no
-login; use it on a trusted local network only.
+The shared folder is read-only, the host accepts connections only from private,
+loopback and link-local addresses, and a client can never leave the shared
+folder: every path component must match a name the host listed. Receiving
+(`OFFER`) is off until it is switched on at the host, accepts only clients in
+the networks of the host's own interfaces (and any that were added by hand), and
+writes only into its inbox folder, as described above. What arrives there is
+untrusted data: the host never opens or runs it. There is no encryption and no
+login (a person has to confirm incoming transfers unless that was switched
+off); use it on a trusted local network only.

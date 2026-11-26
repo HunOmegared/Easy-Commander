@@ -61,14 +61,21 @@ func (r *logRing) since(n int) ([]string, int) {
 // Host
 
 type Host struct {
-	mu      sync.Mutex
-	running bool
-	ln      net.Listener
-	pc      net.PacketConn
-	conns   map[net.Conn]struct{}
+	mu        sync.Mutex
+	listening bool   // the TCP and UDP ports are open
+	sharing   bool   // the shared folder is served
+	shareRoot string // the real path of the shared folder
+	rx        *Receiver
+	ln        net.Listener
+	pc        net.PacketConn
+	conns     map[net.Conn]struct{}
+
+	// Where the addresses of the computer's networks come from (replaced in tests).
+	ifaceAddrs func() ([]net.Addr, error)
 
 	// Valid while running (and after the last run).
 	Dir          string
+	InboxDir     string
 	Port         int
 	Label        string // the name announced to searching clients
 	DiscoveryErr error  // why host search is off, if it is
@@ -79,12 +86,13 @@ func NewHost() *Host {
 }
 
 // Start begins sharing dir on the TCP and UDP port. An empty name means the
-// computer name.
+// computer name. If the host already listens (it is receiving), the port must
+// be the same.
 func (h *Host) Start(dir string, port int, name string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.running {
+	if h.sharing {
 		return errors.New("already sharing")
 	}
 	abs, err := filepath.Abs(dir)
@@ -94,8 +102,28 @@ func (h *Host) Start(dir string, port int, name string) error {
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
 		return fmt.Errorf("%s is not a folder", abs)
 	}
+	if h.rx != nil && samePath(abs, h.rx.cfg.Dir) {
+		return errors.New("the shared folder must not be the inbox")
+	}
+	if err := h.listenLocked(port, name); err != nil {
+		return err
+	}
+	h.sharing = true
+	h.shareRoot = abs
+	h.Dir = abs
+	return nil
+}
+
+// listenLocked opens the ports unless they are open already.
+func (h *Host) listenLocked(port int, name string) error {
 	if port < 1 || port > 65535 {
 		return fmt.Errorf("bad port number %d", port)
+	}
+	if h.listening {
+		if port != h.Port {
+			return fmt.Errorf("the host already listens on port %d", h.Port)
+		}
+		return nil
 	}
 
 	ln, err := net.Listen("tcp4", fmt.Sprintf(":%d", port))
@@ -119,22 +147,18 @@ func (h *Host) Start(dir string, port int, name string) error {
 
 	h.ln = ln
 	h.conns = map[net.Conn]struct{}{}
-	h.Dir, h.Port, h.Label = abs, port, label
-	h.running = true
+	h.Port, h.Label = port, label
+	h.listening = true
 
-	go h.accept(ln, &server{root: abs})
+	go h.accept(ln, &server{host: h})
 	return nil
 }
 
-// Stop ends the sharing and closes every client connection.
-func (h *Host) Stop() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if !h.running {
+func (h *Host) closeListenerLocked() {
+	if !h.listening {
 		return
 	}
-	h.running = false
+	h.listening = false
 	h.ln.Close()
 	if h.pc != nil {
 		h.pc.Close()
@@ -144,10 +168,34 @@ func (h *Host) Stop() {
 	}
 }
 
+// Stop ends the sharing and the receiving and closes every client connection.
+func (h *Host) Stop() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.sharing = false
+	h.shareRoot = ""
+	h.stopReceivingLocked()
+	h.closeListenerLocked()
+}
+
+// StopSharing ends only the sharing; receiving goes on if it is on.
+func (h *Host) StopSharing() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.sharing = false
+	h.shareRoot = ""
+	if h.rx == nil {
+		h.closeListenerLocked()
+	}
+}
+
+// Running is true while the shared folder is served.
 func (h *Host) Running() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.running
+	return h.sharing
 }
 
 // Clients is the number of connected DOS clients.
