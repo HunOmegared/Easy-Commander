@@ -519,7 +519,7 @@ func (s *server) cmdGet(conn net.Conn, w *bufio.Writer, arg string) bool {
 // quietCommand is true for the follow-up blocks of a file transfer (GET with
 // an offset): they would fill the log with one line per 64 KB.
 func quietCommand(cmd, arg string) bool {
-	if cmd != "GET" {
+	if cmd != "GET" && cmd != "IGET" {
 		return false
 	}
 	f := strings.Fields(arg)
@@ -561,9 +561,20 @@ func (s *server) handle(conn net.Conn) {
 			}
 			fmt.Fprint(w, "\r\n")
 			w.Flush()
-		case "LIST", "TREE", "CRC", "GET":
-			root := s.shareDir()
-			if root == "" {
+		case "LIST", "TREE", "CRC", "GET", "ILIST", "ITREE", "ICRC", "IGET":
+			var root string
+			if cmd[0] == 'I' {
+				// The inbox, read-only and with the same names as the share:
+				// only while receiving is on and only for clients that may send.
+				cmd = cmd[1:]
+				if s.host != nil {
+					root = s.host.inboxFor(conn.RemoteAddr())
+				}
+				if root == "" {
+					writeErr(w, errNoUpload)
+					break
+				}
+			} else if root = s.shareDir(); root == "" {
 				writeErr(w, errNoShare)
 				break
 			}

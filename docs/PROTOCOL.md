@@ -113,6 +113,16 @@ Errors of `OFFER`:
 | 500 | the folder could not be created |
 | 507 | over the quota, or not enough free disk space |
 
+### `ILIST`, `ITREE`, `ICRC`, `IGET`
+
+The same four commands as `LIST`, `TREE`, `CRC` and `GET`, but they work on the
+**inbox** (the folder the received files go to) instead of the shared folder:
+the same DOS names, the same answers, read-only. They work only while receiving
+is switched on at the host and only for clients that may send (the host's own
+network); otherwise the answer is `ERR 403 Receiving is off`. The DOS client in
+upload mode shows the inbox in its left panel with them, so what was sent can be
+seen, and fetched again.
+
 ### `QUIT`
 
     OK Bye
@@ -172,7 +182,7 @@ loopback and link-local addresses, and a client can never leave the shared
 folder: every path component must match a name the host listed. Receiving
 (`OFFER`) is off until it is switched on at the host, accepts only clients in
 the networks of the host's own interfaces (and any that were added by hand), and
-writes only into its inbox folder, as described above. What arrives there is
+writes only into its inbox folder, as described above (and lets the same clients read the inbox back, see `ILIST`). What arrives there is
 untrusted data: the host never opens or runs it. There is no encryption and no
 login (a person has to confirm incoming transfers unless that was switched
 off); use it on a trusted local network only.

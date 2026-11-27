@@ -63,7 +63,7 @@ static void nextRequest() {
     FILE *f = fopen(p.c_str(), "wb"); fclose(f); g_ok++; cur++;
   }
   if (cur >= jobs.size()) {
-    char b[64]; snprintf(b, sizeof b, "END %d %d\r\n", g_ok, g_failed); sendTxt(b); endSent = 1; phase = 9; return;
+    char b[64]; snprintf(b, sizeof b, "END %d %d\r\n", g_ok, g_failed); sendTxt(b); endSent = 1; phase = 9; FH_RAW = 0; return;   // normal commands again
   }
   Job &j = jobs[cur];
   long want = j.size - j.off; if (want > 16384) want = 16384;
@@ -107,7 +107,7 @@ static void step() {
       if (in.size() < (size_t)bodyLeft) return;
       fwrite(&in[0], 1, bodyLeft, out); in.erase(in.begin(), in.begin() + bodyLeft);
       jobs[cur].off += bodyLeft; blocks++;
-      if (cancelAfterBlocks >= 0 && blocks >= cancelAfterBlocks) ProgCancel = 1;
+      if (cancelAfterBlocks >= 0 && blocks >= cancelAfterBlocks) { ProgCancel = 1; FH_RAW = 0; phase = 9; return; }   // the client will drop the connection; the host asks nothing more
       if (jobs[cur].off >= jobs[cur].size) { fclose(out); out = 0; g_ok++; cur++; }
       nextRequest(); continue;
     }
@@ -167,6 +167,14 @@ int main() {
   cmdUploadMode();
   check("F4 with UPLOAD in HELLO: upload mode on, right panel active", UploadMode == 1 && UploadCap == 1 && Active == 1);
 
+  check("F4: the left panel was read with ILIST (the host's inbox)", FH_INBOXCMDS >= 1 && Left.path[0] == '\\' && Left.path[1] == 0);
+  {
+    int before = FH_INBOXCMDS;
+    Panel q = Left; q.items = TmpItems;
+    fetchRemoteList("\\", &q);
+    check("in upload mode every listing goes to the inbox", FH_INBOXCMDS == before + 1);
+  }
+
   // F5 = Send, everything selected
   probeList.clear();
   probeList.push_back("GET \\NOTOFFER.TXT 0 10");        // not offered
@@ -186,6 +194,14 @@ int main() {
   {
     Panel t = Left; t.items = TmpItems;
     check("normal commands work again after the transfer", fetchRemoteList("\\", &t) == 0);
+  }
+  {
+    int before = FH_INBOXCMDS;
+    cmdUploadMode();                                    // F4 again: back to the share
+    check("F4 again: upload mode off, share listed with LIST", UploadMode == 0 && FH_INBOXCMDS == before && Active == 0);
+    cmdUploadMode();                                    // and on again for the next tests
+    check("F4 once more: inbox again", UploadMode == 1 && FH_INBOXCMDS > before);
+    FH_RAW = 0;
   }
 
   // WAIT lines before OK
@@ -215,13 +231,12 @@ int main() {
   for (int i = 0; i < Right.count; i++) if (!strcmp(Right.items[i].name, "BIG.BIN")) Right.items[i].sel = 1;
   cancelAfterBlocks = 3;
   cmdSend();
-  check("Esc: the client drops the connection (host would see it close)", Connected == 0);
+  check("Esc: the host asked for nothing more (the client dropped the connection)", phase == 9 && !endSent);
   cancelAfterBlocks = -1;
   FH_RAW = 0;
 
   // a file that disappears after it was offered: ERR for that one, the other goes on
-  FH_PKTS.clear();                       // a new connection starts with nothing left over
-  Connected = 1; Sock = TcpSocketMgr::getSocket();
+  check("after Esc the client reconnected by itself and listed the inbox again", Connected == 1);
   run("rm -rf /tmp/fakeinbox && mkdir -p /tmp/fakeinbox");
   probeList.clear();
   offerMode = 0;

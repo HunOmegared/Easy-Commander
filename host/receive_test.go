@@ -633,3 +633,58 @@ func TestCleanLabel(t *testing.T) {
 		}
 	}
 }
+
+// The inbox can be browsed (and read) like the share, but only while receiving is on.
+func TestInboxBrowse(t *testing.T) {
+	files := []fakeFile{ff("README.TXT", "hello"), fd("SUB"), ff(`SUB\ONE.TXT`, "one")}
+	h, port := startRx(t, InboxConfig{Reserve: 0}, nil)
+	c := dial(t, port)
+	if st := c.offer(files, "BOX"); st != "OK" {
+		t.Fatalf("offer: %s", st)
+	}
+	if end := c.serve(files); end != "END 2 0" {
+		t.Fatalf("end: %s", end)
+	}
+	c.send("ILIST \\")
+	if l := c.line(); l != "OK 1" {
+		t.Fatalf("ILIST root: %s", l)
+	}
+	row := c.line()
+	if !strings.HasPrefix(row, "D\t") {
+		t.Fatalf("session folder: %q", row)
+	}
+	sess := strings.Split(row, "\t")[1] // the DOS name the client sees (BOX_20~1)
+	c.send("ILIST \\" + sess)
+	if l := c.line(); l != "OK 3" {
+		t.Fatalf("ILIST session: %s", l)
+	}
+	for i := 0; i < 3; i++ {
+		c.line()
+	}
+	c.send("IGET \\" + sess + "\\README.TXT")
+	if l := c.line(); l != "OK 5 5" {
+		t.Fatalf("IGET: %s", l)
+	}
+	buf := make([]byte, 5)
+	io.ReadFull(c.r, buf)
+	if string(buf) != "hello" {
+		t.Errorf("content %q", buf)
+	}
+	c.send("IGET \\..\\..\\X")
+	if l := c.line(); !strings.HasPrefix(l, "ERR 400") {
+		t.Errorf("dot dot: %s", l)
+	}
+	// the share and the inbox are different things: sharing is off here
+	c.send("LIST \\")
+	if l := c.line(); !strings.HasPrefix(l, "ERR 403") {
+		t.Errorf("LIST with sharing off: %s", l)
+	}
+
+	// switching receiving off (sharing is off too) closes the connections
+	h.StopReceiving()
+	c.send("ILIST \\")
+	c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if l, err := c.r.ReadString('\n'); err == nil && !strings.HasPrefix(l, "ERR 403") {
+		t.Errorf("ILIST with receiving off: %q", l)
+	}
+}

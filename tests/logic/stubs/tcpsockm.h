@@ -23,6 +23,7 @@ static int FH_COMMANDS=0;
 static void (*FH_RAW)(const uint8_t*,size_t)=0;
 static void (*FH_OFFER)(const std::string&)=0;
 static int FH_UPLOAD=0;
+static int FH_INBOXCMDS=0;    // how many I-commands (the inbox) the fake host answered
 
 static uint32_t fh_crc(const std::vector<uint8_t>&d){ uint32_t c=0xFFFFFFFFu; for(size_t i=0;i<d.size();i++){ c^=d[i]; for(int k=0;k<8;k++) c=(c&1)?(c>>1)^0xEDB88320u:(c>>1);} return c^0xFFFFFFFFu; }
 static void fh_send(const std::string &hdr,const std::vector<uint8_t>&body){
@@ -47,6 +48,7 @@ static void fh_command(const std::string &cmd){
   FH_COMMANDS++;
   size_t sp=cmd.find(' '); std::string verb=cmd.substr(0,sp), arg=(sp==std::string::npos)?"":cmd.substr(sp+1);
   std::vector<uint8_t> none;
+  if(verb.size()>1&&verb[0]=='I'&&verb!="INVALID"){ verb=verb.substr(1); FH_INBOXCMDS++; }   // ILIST, ITREE, IGET, ICRC
   if(verb=="HELLO"){ fh_send(FH_UPLOAD?"OK EASYCOMMANDER 1 UPLOAD\r\n":"OK EASYCOMMANDER 1\r\n",none); return; }
   if(verb=="OFFER"&&FH_OFFER){ FH_OFFER(arg); return; }
   if(verb=="LIST"||verb=="TREE"||verb=="GET"||verb=="CRC"){

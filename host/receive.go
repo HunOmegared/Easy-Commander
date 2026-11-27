@@ -270,6 +270,17 @@ func (h *Host) uploadFor(addr net.Addr) bool {
 	return h.inboxAllowed(rx, ta.IP)
 }
 
+// inboxFor is the inbox folder for a client that may browse it ("" if receiving
+// is off or the client is not in the host's network).
+func (h *Host) inboxFor(addr net.Addr) string {
+	rx := h.receiver()
+	ta, ok := addr.(*net.TCPAddr)
+	if rx == nil || !ok || !h.inboxAllowed(rx, ta.IP) {
+		return ""
+	}
+	return rx.cfg.Dir
+}
+
 // ---------------------------------------------------------------------
 // Helpers
 

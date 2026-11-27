@@ -379,7 +379,11 @@ static char        HostName[80];
 static Item       *TmpItems;
 #ifdef EC_UPLOAD
 static int         UploadCap = 0;     // the host said "UPLOAD" in its HELLO answer
-static int         UploadMode = 0;    // F4: F5 sends the right panel to the host
+static int         UploadMode = 0;    // F4: the left panel shows the host's inbox, F5 sends
+static char        SavedPath[300];    // the left panel's folder in the share (restored by F4)
+#define RPRE       (UploadMode ? "I" : "")   // ILIST, ITREE, IGET, ICRC: the inbox, like the share
+#else
+#define RPRE       ""
 #endif
 
 // Keeps the TCP/IP stack alive; called whenever we wait for something.
@@ -665,7 +669,7 @@ static int fetchRemoteList( const char *path, Panel *dst ) {
 
   CtrlBreakDetected = 0;
 
-  sprintf( cmd, "LIST %s", path );
+  sprintf( cmd, "%sLIST %s", RPRE, path );
 
   if ( sendCommand( cmd ) ) { Connected = 0; return -1; }
 
@@ -968,7 +972,14 @@ static void drawPanel( Panel *p, int x0, int active ) {
 
   // Which side this is.
 #ifdef EC_UPLOAD
-  if ( p->remote && UploadMode ) sprintf( buf, " Host %.16s - UPLOAD MODE ", HostName );
+  if ( p->remote && UploadMode ) {
+    if ( Active == 0 ) sprintf( buf, " INBOX of %.14s - F5 = Get << ", HostName );
+    else               sprintf( buf, " INBOX of %.24s ", HostName );
+  }
+  else if ( !p->remote && UploadMode ) {
+    if ( Active == 1 ) strcpy( buf, " Local - F5 = Send >> " );
+    else               strcpy( buf, " Local " );
+  }
   else
 #endif
   if ( p->remote ) sprintf( buf, " Host %.24s ", HostName );
@@ -995,8 +1006,8 @@ static void drawKeyBar( void ) {
   };
 
 #ifdef EC_UPLOAD
-  normal[3] = UploadMode ? "Down" : "Up";
-  normal[4] = UploadMode ? "Send" : "Get";
+  normal[3] = UploadMode ? "Share" : "Upload";
+  normal[4] = (UploadMode && (Active == 1)) ? "Send" : "Get";
 #endif
 
   static const char *withAlt[10] = {
@@ -1241,7 +1252,7 @@ static int verifyFile( const char *remote, const char *localName ) {
   char line[300];
   char cmd[300];
 
-  sprintf( cmd, "CRC %s", remote );
+  sprintf( cmd, "%sCRC %s", RPRE, remote );
 
   if ( sendCommand( cmd ) || (readLine( line, sizeof( line ) ) < 0) ) {
     Connected = 0;
@@ -1378,7 +1389,7 @@ static int appendTree( const char *remoteDir, const char *prefix ) {
 
   CtrlBreakDetected = 0;
 
-  sprintf( cmd, "TREE %s", remoteDir );
+  sprintf( cmd, "%sTREE %s", RPRE, remoteDir );
 
   if ( sendCommand( cmd ) ) { Connected = 0; return -1; }
   if ( readLine( line, sizeof( line ) ) < 0 ) { Connected = 0; return -1; }
@@ -1573,7 +1584,7 @@ static int downloadFile( const char *remote, const char *localName, u32 *gotOut,
 
   while ( 1 ) {
 
-    sprintf( cmd, "GET %s %lu %lu", remote, (unsigned long)offset, (unsigned long)BLOCK_SIZE );
+    sprintf( cmd, "%sGET %s %lu %lu", RPRE, remote, (unsigned long)offset, (unsigned long)BLOCK_SIZE );
 
     if ( sendCommand( cmd ) || (readLine( line, sizeof( line ) ) < 0) ) {
       Connected = 0;
@@ -1811,7 +1822,7 @@ static long viewRead( u32 off, uint16_t len, u8 *dst ) {
 
   if ( !ensureConnected( ) ) return -1;
 
-  sprintf( cmd, "GET %s %lu %u", VPath, (unsigned long)off, (unsigned)len );
+  sprintf( cmd, "%sGET %s %lu %u", RPRE, VPath, (unsigned long)off, (unsigned)len );
 
   if ( sendCommand( cmd ) || (readLine( line, sizeof( line ) ) < 0) ) {
     Connected = 0;
@@ -3042,9 +3053,16 @@ static int serveOffer( void ) {
 
 static void cmdUploadMode( void ) {
 
-  if ( UploadMode ) {
+  if ( UploadMode ) {                    // back to the shared folder
     UploadMode = 0;
+    strcpy( Left.path, SavedPath[0] ? SavedPath : "\\" );
+    if ( !reloadRemote( &Left ) ) {
+      strcpy( Left.path, "\\" );
+      reloadRemote( &Left );
+    }
     Active = 0;
+    Left.cur = 0;
+    Left.top = 0;
     return;
   }
 
@@ -3072,7 +3090,20 @@ static void cmdUploadMode( void ) {
     return;
   }
 
+  // The left panel now shows the host's inbox: the folder the files arrive in.
+  strncpy( SavedPath, Left.path, sizeof( SavedPath ) - 1 );
+  SavedPath[sizeof( SavedPath ) - 1] = 0;
+  strcpy( Left.path, "\\" );
   UploadMode = 1;
+
+  if ( !reloadRemote( &Left ) ) {        // (a message was shown)
+    UploadMode = 0;
+    strcpy( Left.path, SavedPath );
+    return;
+  }
+
+  Left.cur = 0;
+  Left.top = 0;
   Active = 1;                      // the files to send are in the local (right) panel
 }
 
@@ -3155,7 +3186,7 @@ static void cmdSend( void ) {
   // The label becomes the name of the folder on the host.
   {
     char prompt[70];
-    sprintf( prompt, "%lu file(s), %lu bytes. Name on the host:", TreeFiles, (unsigned long)TreeBytes );
+    sprintf( prompt, "%lu file(s), %lu bytes >> host inbox. Folder name:", TreeFiles, (unsigned long)TreeBytes );
 
     if ( !inputBox( "Send to the host", prompt, UpLabel, 20 ) ) return;
 
@@ -3242,6 +3273,13 @@ static void cmdSend( void ) {
   }
 
   selectAll( &Right, 0 );
+
+  // Show what arrived: the inbox in the left panel (a new folder).
+  if ( Connected || ensureConnected( ) ) {
+    Left.path[0] = '\\';
+    Left.path[1] = 0;
+    reloadRemote( &Left );
+  }
 }
 
 #endif    // EC_UPLOAD
@@ -4039,7 +4077,7 @@ static void cmdHelp( void ) {
   lines[14] = memLine;
 
 #ifdef EC_UPLOAD
-  lines[13] = "F4          upload mode: F5 then SENDS the right panel to the host";
+  lines[13] = "F4          upload mode: left = host inbox; F5 sends right >>, or gets <<";
   lines[14] = "Ctrl+O      look at the DOS screen (any key returns)";
   lines[15] = memLine;
   uiDialog( "Easy Commander - help", lines, 16, 0 );
@@ -4172,7 +4210,7 @@ static void handleKey( int k ) {
     case K_CTRL_O: cmdDosScreen( ); break;
 #ifdef EC_UPLOAD
     case K_F4:   cmdUploadMode( ); break;
-    case K_F5:   if ( UploadMode ) cmdSend( ); else cmdDownload( ); break;
+    case K_F5:   if ( UploadMode && (Active == 1) ) cmdSend( ); else cmdDownload( ); break;
 #else
     case K_F5:   cmdDownload( ); break;
 #endif
