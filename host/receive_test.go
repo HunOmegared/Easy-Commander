@@ -920,3 +920,32 @@ func TestResumeChecksTheWholeFile(t *testing.T) {
 		t.Fatalf("bad crc: %s", end)
 	}
 }
+
+// An interrupted transfer to the inbox root goes on in the folder it started (same label).
+func TestResumeAtRootReusesFolder(t *testing.T) {
+	data := strings.Repeat("0123456789abcdef", 6000)
+	h, port := startRx(t, InboxConfig{Reserve: 0}, nil)
+	old := filepath.Join(h.rx.cfg.Dir, "PC1_20250101_1200")
+	os.Mkdir(old, 0o755)
+	os.WriteFile(filepath.Join(old, "BIG.BIN.part"), []byte(data[:40000]), 0o644)
+	other := filepath.Join(h.rx.cfg.Dir, "OTHER_20250101_1200")
+	os.Mkdir(other, 0o755)
+	os.WriteFile(filepath.Join(other, "BIG.BIN.part"), []byte("x"), 0o644)
+
+	c := dial(t, port)
+	files := []fakeFile{ff("BIG.BIN", data)}
+	n, total := counts(files)
+	c.send(fmt.Sprintf(`OFFER %d %d \ PC1`, n, total))
+	if st := c.status(); st != "OK" {
+		t.Fatalf("offer: %s", st)
+	}
+	if end := c.serve(files); end != "END 1 0 0" {
+		t.Fatalf("end: %s", end)
+	}
+	if readFile(t, filepath.Join(old, "BIG.BIN")) != data {
+		t.Error("not resumed in the old folder")
+	}
+	if len(c.gets) == 0 || !strings.HasPrefix(c.gets[0], `GET \BIG.BIN 40000 `) {
+		t.Errorf("first GET: %v", c.gets)
+	}
+}

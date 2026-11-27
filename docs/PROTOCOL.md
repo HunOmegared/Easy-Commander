@@ -218,3 +218,6 @@ writes only into its inbox folder, as described above (and lets the same clients
 untrusted data: the host never opens or runs it. There is no encryption and no
 login (a person has to confirm incoming transfers unless that was switched
 off); use it on a trusted local network only.
+
+
+**Resume at the inbox root.** An `OFFER` to `\` normally makes a new `<label>_<date>_<time>` folder. If an older folder with the same label holds an unfinished `.part` file, the newest such folder is used instead, so an interrupted transfer continues where it stopped.

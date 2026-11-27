@@ -367,6 +367,33 @@ func dirSize(dir string) int64 {
 }
 
 // makeSessionDir creates base/name, or base/name_2, name_3 ... when it exists.
+// resumableDir returns the newest folder "<label>_<date>_<time>[_n]" in base that holds
+// an unfinished .part file (and nothing else is needed to resume), or "".
+func resumableDir(base, label string) string {
+	ents, err := os.ReadDir(base)
+	if err != nil {
+		return ""
+	}
+	best := ""
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), label+"_") || e.Name() <= best {
+			continue
+		}
+		found := false
+		filepath.WalkDir(filepath.Join(base, e.Name()), func(p string, d fs.DirEntry, err error) error {
+			if err == nil && !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".part") {
+				found = true
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if found {
+			best = e.Name()
+		}
+	}
+	return best
+}
+
 func makeSessionDir(base, name string) (string, error) {
 	for i := 1; i < 100; i++ {
 		n := name
@@ -774,6 +801,14 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 	}
 
 	dest := fmt.Sprintf("%s_%s", label, time.Now().Format("20060102_1504"))
+	resumeInto := ""
+	if atRoot {
+		// An interrupted transfer of the same label left a .part file: go on in that folder.
+		resumeInto = resumableDir(cfg.Dir, label)
+		if resumeInto != "" {
+			dest = resumeInto
+		}
+	}
 	if !atRoot {
 		if rel, err := filepath.Rel(cfg.Dir, destReal); err == nil {
 			dest = rel
@@ -832,7 +867,9 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 	}
 
 	sdir := destReal
-	if atRoot {
+	if atRoot && resumeInto != "" {
+		sdir = filepath.Join(cfg.Dir, resumeInto)
+	} else if atRoot {
 		var err error
 		sdir, err = makeSessionDir(cfg.Dir, dest)
 		if err != nil {
