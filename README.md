@@ -200,6 +200,9 @@ download itself unless the fast CRC32 loop (F9) is used.
   (`_heapchk()` after the stack is shut down); the unmodified mTCP Netcat
   prints it too with that compiler, and it disappears when EC and ECTEST are
   built with Open Watcom 1.9. Every CRC32 check passed with both compilers.
+
+## Good to know
+
 * The client only sees DOS 8.3 names; the host maps long names to
   `BASE~1.EXT` style names.
 * The host search is a broadcast: it does not cross routers, and hosts started
