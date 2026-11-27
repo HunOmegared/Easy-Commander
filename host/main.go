@@ -531,6 +531,7 @@ func (s *server) handle(conn net.Conn) {
 	remote := conn.RemoteAddr().String()
 	r := bufio.NewReaderSize(conn, maxLine)
 	w := bufio.NewWriter(conn)
+	mkdirs := 0
 	for {
 		conn.SetReadDeadline(time.Now().Add(idleTimeout))
 		raw, err := r.ReadSlice('\n')
@@ -591,6 +592,20 @@ func (s *server) handle(conn net.Conn) {
 					return
 				}
 			}
+		case "IMKDIR":
+			var root string
+			if s.host != nil {
+				root = s.host.inboxFor(conn.RemoteAddr())
+			}
+			if root == "" {
+				writeErr(w, errNoUpload)
+				break
+			}
+			if mkdirs++; mkdirs > maxMkdirsPerConn {
+				writeErr(w, protoErr{403, "Too many folders made in this session"})
+				break
+			}
+			(&server{root: root}).cmdMkdir(w, arg)
 		case "OFFER":
 			if s.host == nil {
 				writeErr(w, errNoUpload)

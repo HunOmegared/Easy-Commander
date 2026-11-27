@@ -53,7 +53,7 @@ state.
 
 CRC-32 (IEEE 802.3, the one used by zip) of the whole file.
 
-### `OFFER <files> <bytes> [label]`
+### `OFFER <files> <bytes> <path> [label]`
 
 The other direction (the DOS client sends, the host receives). Only works while
 the person at the host has switched receiving on, and only for clients in the
@@ -62,8 +62,12 @@ host's own network. `HELLO` tells a client that it may try: the answer ends with
 
     OK EASYCOMMANDER 1 UPLOAD
 
-`<files>` and `<bytes>` are the number of files and their total size, `label`
-(letters, digits, `_`, `-`, up to 20) names the folder the files arrive in.
+`<files>` and `<bytes>` are the number of files and their total size. `<path>` is
+the folder of the inbox the files should go into, as the client sees it (a DOS
+path, `\` is the root of the inbox; the folders can be made with `IMKDIR`). In the
+root the host makes a new folder `<label>_<YYYYMMDD>_<HHMM>` for them (`label`:
+letters, digits, `_`, `-`, up to 20, default: the client's address); in any other
+folder the files go straight into it.
 
     WAIT                         (every 5 seconds while somebody at the host is asked)
     OK                           the host agrees
@@ -88,14 +92,16 @@ received as `NAME.EXT.part` and goes on with the next file.
 
 Everything is decided on the host, and nothing the client says is trusted:
 
-* The files go into a new folder `<label>_<YYYYMMDD>_<HHMM>` below the inbox
-  folder (never into the shared folder, never over an existing file or folder).
+* The files go into the folder named by `<path>` below the inbox folder, or, in the
+  root, into a new folder `<label>_<YYYYMMDD>_<HHMM>` (never into the shared
+  folder). A file that exists already is never overwritten: it is skipped, counts
+  as failed and is named in the report.
 * Every name must be a plain 8.3 name: no `..`, no separators, no device names
   (`CON`, `NUL`, `COM1` ...). A folder must be listed before its contents. A
   list that breaks a rule ends the transfer with `ABORT`.
 * A file is written as `NAME.EXT.part` and renamed when it is complete; the date
-  and time from the list are set on it. A report `ECINBOX.LOG` is written into
-  the folder.
+  and time from the list are set on it. A report `ECINBOX.LOG` is added to the
+  folder (the reports of several transfers follow each other).
 * The number of files and bytes may not exceed what was offered.
 * The offer is refused before anyone is asked when the inbox would exceed its
   quota, or when less than a reserve (1 GB) of free disk space would remain.
@@ -105,7 +111,9 @@ Errors of `OFFER`:
 
 | Code | Meaning |
 |---|---|
-| 400 | bad numbers |
+| 400 | bad numbers, bad path |
+| 404 | the destination folder does not exist |
+| 405 | the destination is not a folder |
 | 401 | the person at the host said no |
 | 403 | receiving is off, or the client is not in the host's network |
 | 408 | nobody at the host answered in time (60 seconds) |
@@ -122,6 +130,13 @@ is switched on at the host and only for clients that may send (the host's own
 network); otherwise the answer is `ERR 403 Receiving is off`. The DOS client in
 upload mode shows the inbox in its left panel with them, so what was sent can be
 seen, and fetched again.
+
+### `IMKDIR <path>`
+
+Makes a folder in the inbox: the last component of `<path>` is the new name (a plain
+8.3 name, no device names), the folder above it must exist. `OK`, or `ERR 400` (bad
+name or path), `404` (no such parent), `405`, `409` (exists already), `403` (receiving
+is off, the client may not, or more than 100 folders in one connection).
 
 ### `QUIT`
 

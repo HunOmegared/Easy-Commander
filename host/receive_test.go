@@ -86,7 +86,7 @@ func counts(files []fakeFile) (n int, total int64) {
 
 func (c *fakeClient) offer(files []fakeFile, label string) string {
 	n, total := counts(files)
-	cmd := fmt.Sprintf("OFFER %d %d", n, total)
+	cmd := fmt.Sprintf(`OFFER %d %d \`, n, total)
 	if label != "" {
 		cmd += " " + label
 	}
@@ -308,7 +308,7 @@ func TestReceiveRefusals(t *testing.T) {
 	// bad numbers
 	_, p4 := startRx(t, InboxConfig{}, nil)
 	c4 := dial(t, p4)
-	for _, bad := range []string{"OFFER", "OFFER x y", "OFFER -1 5", "OFFER 1 -5", "OFFER 1 2 3 4"} {
+	for _, bad := range []string{"OFFER", "OFFER x y", "OFFER -1 5", "OFFER 1 -5", "OFFER 1 2 3 4 5", "OFFER 1 2"} {
 		c4.send(bad)
 		if l := c4.line(); !strings.HasPrefix(l, "ERR 400") {
 			t.Errorf("%q -> %s", bad, l)
@@ -449,7 +449,7 @@ func TestReceiveAskTimeoutSendsWait(t *testing.T) {
 
 	c := dial(t, port)
 	n, total := counts(files)
-	c.send(fmt.Sprintf("OFFER %d %d", n, total))
+	c.send(fmt.Sprintf(`OFFER %d %d \`, n, total))
 	if st := c.status(); !strings.HasPrefix(st, "ERR 408") {
 		t.Errorf("no answer: %s", st)
 	}
@@ -478,7 +478,7 @@ func TestReceiveRefusesBadNames(t *testing.T) {
 		h, port := startRx(t, InboxConfig{}, nil)
 		c := dial(t, port)
 		n, total := 1, int64(1)
-		c.send(fmt.Sprintf("OFFER %d %d", n, total))
+		c.send(fmt.Sprintf(`OFFER %d %d \`, n, total))
 		if st := c.status(); st != "OK" {
 			t.Fatalf("%q: %s", name, st)
 		}
@@ -513,7 +513,7 @@ func TestReceiveRefusesBrokenLists(t *testing.T) {
 	for name, list := range cases {
 		h, port := startRx(t, InboxConfig{}, nil)
 		c := dial(t, port)
-		c.send("OFFER 1 1") // one file of one byte
+		c.send(`OFFER 1 1 \`) // one file of one byte
 		if st := c.status(); st != "OK" {
 			t.Fatal(st)
 		}
@@ -525,7 +525,7 @@ func TestReceiveRefusesBrokenLists(t *testing.T) {
 	// a file bigger than offered
 	_, port := startRx(t, InboxConfig{}, nil)
 	c := dial(t, port)
-	c.send("OFFER 1 3")
+	c.send(`OFFER 1 3 \`)
 	c.status()
 	if end := c.serve([]fakeFile{ff("A.TXT", "12345")}); !strings.HasPrefix(end, "ABORT") {
 		t.Errorf("bigger than offered: %q", end)
@@ -537,7 +537,7 @@ func TestReceiveClientLiesAboutSize(t *testing.T) {
 	// GET with too little data. The host must not hang or accept it as complete.
 	_, port := startRx(t, InboxConfig{}, nil)
 	c := dial(t, port)
-	c.send("OFFER 1 5000")
+	c.send(`OFFER 1 5000 \`)
 	c.status()
 	c.line() // TREE
 	fmt.Fprintf(c.conn, "OK 1 5000\r\nF\tA.DAT\t5000\t20200304\t1234\r\n")
@@ -686,5 +686,84 @@ func TestInboxBrowse(t *testing.T) {
 	c.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if l, err := c.r.ReadString('\n'); err == nil && !strings.HasPrefix(l, "ERR 403") {
 		t.Errorf("ILIST with receiving off: %q", l)
+	}
+}
+
+// A folder made with IMKDIR can be the destination: the files go straight into it,
+// nothing existing is overwritten, and everything is checked by the host.
+func TestMkdirAndOfferIntoFolder(t *testing.T) {
+	h, port := startRx(t, InboxConfig{Reserve: 0}, nil)
+	c := dial(t, port)
+
+	mk := func(arg string) string { c.send("IMKDIR " + arg); return c.line() }
+	if l := mk(`\BACKUP`); l != "OK" {
+		t.Fatalf("IMKDIR: %s", l)
+	}
+	if l := mk(`\BACKUP`); !strings.HasPrefix(l, "ERR 409") {
+		t.Errorf("again: %s", l)
+	}
+	if l := mk(`\BACKUP\OLD486`); l != "OK" {
+		t.Errorf("sub: %s", l)
+	}
+	for _, bad := range []string{`\..\X`, `\BACKUP\..`, `\CON`, `\LONGNAME9`, `\A B`, `\NOPE\X`, ``, `\BACKUP\FILE.TXT\X`} {
+		if l := mk(bad); !strings.HasPrefix(l, "ERR") {
+			t.Errorf("IMKDIR %q accepted: %s", bad, l)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(h.rx.cfg.Dir, "BACKUP", "OLD486")); err != nil {
+		t.Fatal("folder not made")
+	}
+
+	files := []fakeFile{ff("A.TXT", "one"), fd("SUB"), ff(`SUB\B.TXT`, "two")}
+	n, total := counts(files)
+	c.send(fmt.Sprintf(`OFFER %d %d \BACKUP\OLD486`, n, total))
+	if st := c.status(); st != "OK" {
+		t.Fatalf("offer: %s", st)
+	}
+	if end := c.serve(files); end != "END 2 0" {
+		t.Fatalf("end: %s", end)
+	}
+	dir := filepath.Join(h.rx.cfg.Dir, "BACKUP", "OLD486")
+	if readFile(t, filepath.Join(dir, "A.TXT")) != "one" || readFile(t, filepath.Join(dir, "SUB", "B.TXT")) != "two" {
+		t.Error("files not in the folder")
+	}
+	if es, _ := os.ReadDir(filepath.Join(h.rx.cfg.Dir, "BACKUP")); len(es) != 1 {
+		t.Errorf("no session folder is made inside a chosen folder: %d entries", len(es))
+	}
+
+	// the same again: nothing is overwritten, the files are skipped
+	os.WriteFile(filepath.Join(dir, "A.TXT"), []byte("MINE"), 0o644)
+	c.send(fmt.Sprintf(`OFFER %d %d \BACKUP\OLD486`, n, total))
+	if st := c.status(); st != "OK" {
+		t.Fatalf("offer 2: %s", st)
+	}
+	if end := c.serve(files); end != "END 0 2" {
+		t.Fatalf("end 2: %s", end)
+	}
+	if readFile(t, filepath.Join(dir, "A.TXT")) != "MINE" {
+		t.Error("an existing file was overwritten")
+	}
+	rep := readFile(t, filepath.Join(dir, reportName))
+	if strings.Count(rep, "Easy Commander inbox report") != 2 || !strings.Contains(rep, "SKIPPED A.TXT") {
+		t.Errorf("report: %q", rep)
+	}
+
+	// bad destinations are refused before anything is asked
+	for _, d := range []string{`\NOPE`, `\..`, `\BACKUP\OLD486\A.TXT`} {
+		c.send(fmt.Sprintf(`OFFER 1 3 %s`, d))
+		if st := c.status(); !strings.HasPrefix(st, "ERR") {
+			t.Errorf("destination %q accepted: %s", d, st)
+		}
+	}
+
+	// IMKDIR is limited per connection
+	c2 := dial(t, port)
+	var last string
+	for i := 0; i <= maxMkdirsPerConn+1; i++ {
+		c2.send(fmt.Sprintf(`IMKDIR \D%d`, i))
+		last = c2.line()
+	}
+	if !strings.HasPrefix(last, "ERR 403") {
+		t.Errorf("no limit: %s", last)
 	}
 }

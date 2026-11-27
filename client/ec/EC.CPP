@@ -3159,6 +3159,48 @@ static int waitOfferAnswer( void ) {
   }
 }
 
+// F7 in the inbox panel: make a folder in the host's inbox (IMKDIR).
+static void cmdInboxMakeDir( void ) {
+
+  char name[16];
+  char full[300];
+  char cmd[320];
+  char line[200];
+
+  name[0] = 0;
+
+  if ( !inputBox( "Make folder in the inbox", "Name of the new folder:", name, 12 ) ) return;
+
+  if ( !ensureConnected( ) ) {
+    uiMessage( "Make folder", "Connection problem:", ErrMsg );
+    return;
+  }
+
+  strcpy( full, Left.path );
+  pathDown( full, name );
+  sprintf( cmd, "IMKDIR %s", full );
+
+  if ( sendCommand( cmd ) || (readLine( line, sizeof( line ) ) < 0) ) {
+    Connected = 0;
+    uiMessage( "Make folder", "Connection problem:", ErrMsg );
+    return;
+  }
+
+  if ( strcmp( line, "OK" ) != 0 ) {
+    strncpy( HostMsg, line, sizeof( HostMsg ) - 1 );
+    HostMsg[sizeof( HostMsg ) - 1] = 0;
+    uiMessage( "Make folder", "The host says:", HostMsg );
+    return;
+  }
+
+  reloadRemote( &Left );
+
+  for ( int i = 0; i < Left.count; i++ ) {
+    if ( stricmp( Left.items[i].name, name ) == 0 ) { Left.cur = i; break; }
+  }
+  fixView( &Left );
+}
+
 static void cmdSend( void ) {
 
   if ( Active != 1 ) {
@@ -3183,24 +3225,26 @@ static void cmdSend( void ) {
     return;
   }
 
-  // The label becomes the name of the folder on the host.
+  // Ask first: both ends and the direction are shown.
   {
-    char prompt[70];
-    sprintf( prompt, "%lu file(s), %lu bytes >> host inbox. Folder name:", TreeFiles, (unsigned long)TreeBytes );
+    char s1[60], s2[60], s3[60];
+    const char *lines[4];
+    int nl = 0;
 
-    if ( !inputBox( "Send to the host", prompt, UpLabel, 20 ) ) return;
+    sprintf( s1, "%lu file(s), %lu bytes", TreeFiles, (unsigned long)TreeBytes );
+    sprintf( s2, "from  %.36s", Right.path );
+    sprintf( s3, "to    host inbox %.20s", Left.path );
 
-    // Letters, digits, - and _ only: anything else would be refused.
-    char *o = UpLabel;
-    for ( char *c = UpLabel; *c; c++ ) {
-      if ( isalnum( (unsigned char)*c ) || (*c == '-') || (*c == '_') ) *o++ = *c;
-    }
-    *o = 0;
-    if ( UpLabel[0] == 0 ) strcpy( UpLabel, "DOS" );
+    lines[nl++] = s1;
+    lines[nl++] = s2;
+    lines[nl++] = s3;
+    if ( isRemoteRoot( Left.path ) ) lines[nl++] = "(the host makes a new folder for them)";
+
+    if ( !uiDialog( "Send to the host", lines, nl, 1 ) ) return;
   }
 
-  char cmd[100];
-  sprintf( cmd, "OFFER %lu %lu %s", TreeFiles, (unsigned long)TreeBytes, UpLabel );
+  char cmd[320];
+  sprintf( cmd, "OFFER %lu %lu %s %s", TreeFiles, (unsigned long)TreeBytes, Left.path, UpLabel );
 
   CtrlBreakDetected = 0;
 
@@ -3265,7 +3309,7 @@ static void cmdSend( void ) {
     lines[nl++] = s2;
 
     if ( (res == 0) && UpHostFailed ) {
-      sprintf( s3, "See ECINBOX.LOG in the folder \"%.20s_...\" on the host.", UpLabel );
+      strcpy( s3, "See ECINBOX.LOG in the target folder on the host." );
       lines[nl++] = s3;
     }
 
@@ -3274,12 +3318,8 @@ static void cmdSend( void ) {
 
   selectAll( &Right, 0 );
 
-  // Show what arrived: the inbox in the left panel (a new folder).
-  if ( Connected || ensureConnected( ) ) {
-    Left.path[0] = '\\';
-    Left.path[1] = 0;
-    reloadRemote( &Left );
-  }
+  // Show what arrived: the inbox in the left panel, in the same folder.
+  if ( Connected || ensureConnected( ) ) reloadRemote( &Left );
 }
 
 #endif    // EC_UPLOAD
@@ -3995,6 +4035,13 @@ static void cmdChooseHost( void ) {
 }
 
 static void cmdMakeDir( void ) {
+
+#ifdef EC_UPLOAD
+  if ( UploadMode && (Active == 0) ) {
+    cmdInboxMakeDir( );
+    return;
+  }
+#endif
 
   if ( Active != 1 ) {
     uiMessage( "Make folder", "Folders can only be made in the", "right (local) panel." );

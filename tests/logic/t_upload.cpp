@@ -175,6 +175,18 @@ int main() {
     check("in upload mode every listing goes to the inbox", FH_INBOXCMDS == before + 1);
   }
 
+  // F7 in the inbox panel makes a folder there (IMKDIR)
+  {
+    Active = 0;
+    g_scriptMode = 1; g_script.clear();
+    for (const char *c = "NEWDIR"; *c; c++) g_script.push_back(*c);
+    g_script.push_back(13);
+    cmdMakeDir();
+    g_scriptMode = 0; g_script.clear();
+    check("F7 in the inbox panel: IMKDIR \\NEWDIR", FH_LASTMKDIR == "\\NEWDIR");
+    Active = 1;
+  }
+
   // F5 = Send, everything selected
   probeList.clear();
   probeList.push_back("GET \\NOTOFFER.TXT 0 10");        // not offered
@@ -184,7 +196,7 @@ int main() {
   for (int i = 0; i < Right.count; i++) if (strcmp(Right.items[i].name, "..")) Right.items[i].sel = 1;
   Active = 1;
   cmdSend();
-  check("OFFER line: 5 files, 270011 bytes, label DOS", lastOffer == "5 270011 DOS");
+  check("OFFER line: 5 files, 270011 bytes, destination \\ (inbox root), label DOS", lastOffer == "5 270011 \\ DOS");
   check("host got every file, byte for byte (incl. empty file and folder)", run("diff -r /tmp/fakeup /tmp/fakeinbox") == 0);
   check("host got END with 5 ok / 0 failed", endSent && g_ok == 5 && g_failed == 0);
   check("all 4 probes (not offered / CRC / .. / LIST) were answered with ERR", probes == 4 && probeErr == 4);

@@ -282,6 +282,55 @@ func (h *Host) inboxFor(addr net.Addr) string {
 }
 
 // ---------------------------------------------------------------------
+// IMKDIR: make a folder in the inbox
+
+const maxMkdirsPerConn = 100
+const maxMkdirDepth = 16
+
+// cmdMkdir creates the folder named by arg (a DOS path whose last component is
+// the new name) below the inbox. The parent must exist and be one the client can
+// see; the new name must be a plain 8.3 name that is not taken.
+func (s *server) cmdMkdir(w *bufio.Writer, arg string) {
+	parts := strings.FieldsFunc(arg, func(r rune) bool { return r == '/' || r == '\\' })
+	if len(parts) == 0 || len(parts) > maxMkdirDepth {
+		writeErr(w, errBad)
+		return
+	}
+	name, ok := cleanDOSComponent(parts[len(parts)-1])
+	if !ok {
+		writeErr(w, protoErr{400, "Not a plain 8.3 folder name"})
+		return
+	}
+	parent, ent, err := s.resolve(strings.Join(parts[:len(parts)-1], `\`))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if ent != nil && !ent.Dir {
+		writeErr(w, protoErr{405, "Not a folder"})
+		return
+	}
+	es, err := listDir(parent)
+	if err != nil {
+		writeErr(w, errNotFound)
+		return
+	}
+	for _, e := range es {
+		if e.DOS == name || strings.EqualFold(e.Real, name) {
+			writeErr(w, protoErr{409, "Exists already"})
+			return
+		}
+	}
+	if err := os.Mkdir(filepath.Join(parent, name), 0o755); err != nil {
+		writeErr(w, errCantCreate)
+		return
+	}
+	logf("folder %s made in the inbox", strings.Join(parts, `\`))
+	fmt.Fprint(w, "OK\r\n")
+	w.Flush()
+}
+
+// ---------------------------------------------------------------------
 // Helpers
 
 func cleanLabel(s string) string {
@@ -411,10 +460,11 @@ type clientError struct{ msg string }
 func (e clientError) Error() string { return e.msg }
 
 type receiveSession struct {
-	conn net.Conn
-	r    *bufio.Reader
-	w    *bufio.Writer
-	rx   *Receiver
+	conn    net.Conn
+	r       *bufio.Reader
+	w       *bufio.Writer
+	rx      *Receiver
+	release func() // marks the receiver free (called once, before END)
 }
 
 // ask sends one command to the client and returns the status line it answers
@@ -507,6 +557,9 @@ func (s *receiveSession) readItems(files int, total int64) ([]offered, error) {
 // only this file failed.
 func (s *receiveSession) receiveFile(local string, o offered, received *int64, limit int64) error {
 	tmp := local + ".part"
+	if st, err := os.Lstat(tmp); err == nil && st.Mode().IsRegular() {
+		os.Remove(tmp) // left over from an earlier, interrupted transfer
+	}
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return err
@@ -583,7 +636,7 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 	}
 
 	f := strings.Fields(arg)
-	if len(f) < 2 || len(f) > 3 {
+	if len(f) < 3 || len(f) > 4 {
 		writeErr(w, errBad)
 		return true
 	}
@@ -594,19 +647,39 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 		return true
 	}
 	label := ""
-	if len(f) == 3 {
-		label = cleanLabel(f[2])
+	if len(f) == 4 {
+		label = cleanLabel(f[3])
 	}
 	if label == "" {
 		label = strings.ReplaceAll(ta.IP.String(), ".", "_")
 		label = strings.ReplaceAll(label, ":", "_")
 	}
 
+	// Where the files go: the folder the client names (a folder of the inbox, as the
+	// client sees it). In the root of the inbox a new folder is made for them.
+	destReal, destEnt, derr := (&server{root: rx.cfg.Dir}).resolve(f[2])
+	if derr != nil {
+		writeErr(w, derr)
+		return true
+	}
+	if destEnt != nil && !destEnt.Dir {
+		writeErr(w, protoErr{405, "Not a folder"})
+		return true
+	}
+	atRoot := destEnt == nil
+
 	if !rx.busy.CompareAndSwap(false, true) {
 		writeErr(w, errBusyRecv)
 		return true
 	}
-	defer rx.busy.Store(false)
+	released := false
+	release := func() { // before END is sent: the client may start the next transfer at once
+		if !released {
+			released = true
+			rx.busy.Store(false)
+		}
+	}
+	defer release()
 	rx.setActive(conn)
 	defer rx.setActive(nil)
 
@@ -628,6 +701,11 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 	}
 
 	dest := fmt.Sprintf("%s_%s", label, time.Now().Format("20060102_1504"))
+	if !atRoot {
+		if rel, err := filepath.Rel(cfg.Dir, destReal); err == nil {
+			dest = rel
+		}
+	}
 	info := OfferInfo{Remote: ta.IP.String(), Label: label, Files: files, Bytes: total,
 		Dest: dest, Free: free, Used: used, Quota: cfg.Quota}
 
@@ -680,10 +758,17 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 		}
 	}
 
-	sdir, err := makeSessionDir(cfg.Dir, dest)
-	if err != nil {
-		logf("cannot create the folder for %s: %v", ta.IP, err)
-		writeErr(w, errCantCreate)
+	sdir := destReal
+	if atRoot {
+		var err error
+		sdir, err = makeSessionDir(cfg.Dir, dest)
+		if err != nil {
+			logf("cannot create the folder for %s: %v", ta.IP, err)
+			writeErr(w, errCantCreate)
+			return true
+		}
+	} else if st, err := os.Stat(sdir); err != nil || !st.IsDir() {
+		writeErr(w, errNotFound)
 		return true
 	}
 	conn.SetWriteDeadline(time.Now().Add(writeTimeout))
@@ -694,7 +779,7 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 	conn.SetWriteDeadline(time.Time{})
 	logf("%s: receiving %d files (%d bytes) into %s", ta.IP, files, total, sdir)
 
-	s := &receiveSession{conn: conn, r: r, w: w, rx: rx}
+	s := &receiveSession{conn: conn, r: r, w: w, rx: rx, release: release}
 	return s.run(sdir, ta.IP.String(), label, files, total)
 }
 
@@ -736,6 +821,13 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 			}
 			continue
 		}
+		if _, err := os.Lstat(local); err == nil {
+			// Only new files are written into a folder that exists already.
+			failed++
+			logf("%s: %s skipped: it exists already", remote, o.rel())
+			report = append(report, fmt.Sprintf("SKIPPED %s: it exists already", o.rel()))
+			continue
+		}
 		var ferr error
 		if o.size == 0 {
 			f, err := os.OpenFile(local, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
@@ -768,14 +860,13 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 		}
 	}
 
-	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	fmt.Fprintf(s.w, "END %d %d\r\n", ok, failed)
-	if s.w.Flush() != nil {
-		return false
-	}
+	// The report is written and the receiver is free again before the client hears END.
 	logf("%s: received %d files (%d bytes), %d failed, in %s", remote, ok, received, failed, time.Since(started).Round(time.Second))
 	writeReport(sdir, remote, label, started, ok, failed, received, report)
-	return true
+	s.release()
+	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	fmt.Fprintf(s.w, "END %d %d\r\n", ok, failed)
+	return s.w.Flush() == nil
 }
 
 func isConnErr(err error) bool {
@@ -797,5 +888,14 @@ func writeReport(sdir, remote, label string, started time.Time, ok, failed int, 
 	for _, l := range lines {
 		fmt.Fprintf(&b, "%s\r\n", l)
 	}
-	os.WriteFile(filepath.Join(sdir, reportName), []byte(b.String()), 0o644)
+	// Several transfers into one folder: the reports follow each other.
+	f, err := os.OpenFile(filepath.Join(sdir, reportName), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.Size() > 0 {
+		f.WriteString("\r\n")
+	}
+	f.WriteString(b.String())
 }

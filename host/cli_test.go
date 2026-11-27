@@ -83,7 +83,7 @@ func TestReceiveWaitKeepAlive(t *testing.T) {
 	_, port := startRx(t, InboxConfig{Ask: true}, confirm)
 	c := dial(t, port)
 	n, total := counts(files)
-	c.send(fmt.Sprintf("OFFER %d %d", n, total))
+	c.send(fmt.Sprintf(`OFFER %d %d \`, n, total))
 	waits := 0
 	go func() { time.Sleep(250 * time.Millisecond); close(release) }()
 	for {
