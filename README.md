@@ -149,7 +149,7 @@ If something does not work:
 * **F6** sends a whole **floppy or hard disk** as an image file (`FLOPPYA.IMG`, `DISK80.IMG` ...)
   through BIOS INT 13h, with LBA where the BIOS has it. Unreadable sectors are
   retried and then sent as zeros (the summary says how many). Disks above 4 GB are not
-  supported yet. A WinImage or `mount -o loop` of the result shows the partition.
+  supported yet. WinImage opens the result and shows the partition and its files.
 * An interrupted transfer (Esc, cable, power) is **resumed**: the host keeps a `.part`
   file, continues from there and checks the whole file with CRC32 at the end. Files
   that are already there with the same size and time are skipped (**Unchanged**).
