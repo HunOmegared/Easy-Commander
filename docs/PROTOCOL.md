@@ -64,10 +64,10 @@ host's own network. `HELLO` tells a client that it may try: the answer ends with
 
 `<files>` and `<bytes>` are the number of files and their total size. `<path>` is
 the folder of the inbox the files should go into, as the client sees it (a DOS
-path, `\` is the root of the inbox; the folders can be made with `IMKDIR`). In the
-root the host makes a new folder `<label>_<YYYYMMDD>_<HHMM>` for them (`label`:
-letters, digits, `_`, `-`, up to 20, default: the client's address); in any other
-folder the files go straight into it.
+path, `\` is the root of the inbox; the folders can be made with `IMKDIR`). The files go
+straight into that folder, also in the root (like copying in a file manager); `label`
+(letters, digits, `_`, `-`, up to 20, default: the client's address) only names the
+sender in the report.
 
     WAIT                         (every 5 seconds while somebody at the host is asked)
     OK                           the host agrees
@@ -100,9 +100,8 @@ received as `NAME.EXT.part` and goes on with the next file.
 
 Everything is decided on the host, and nothing the client says is trusted:
 
-* The files go into the folder named by `<path>` below the inbox folder, or, in the
-  root, into a new folder `<label>_<YYYYMMDD>_<HHMM>` (never into the shared
-  folder). A file that already exists is never overwritten: it is skipped, counts
+* The files go into the folder named by `<path>` below the inbox folder, (the inbox
+  itself at the root, never the shared folder). A file that already exists is never overwritten: it is skipped, counts
   as failed and is named in the report.
 * Every name must be a plain 8.3 name: no `..`, no separators, no device names
   (`CON`, `NUL`, `COM1` ...). A folder must be listed before its contents. A
@@ -218,6 +217,3 @@ writes only into its inbox folder, as described above (and lets the same clients
 untrusted data: the host never opens or runs it. There is no encryption and no
 login (a person has to confirm incoming transfers unless that was switched
 off); use it on a trusted local network only.
-
-
-**Resume at the inbox root.** An `OFFER` to `\` normally makes a new `<label>_<date>_<time>` folder. If an older folder with the same label holds an unfinished `.part` file, the newest such folder is used instead, so an interrupted transfer continues where it stopped.

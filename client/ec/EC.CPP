@@ -3718,9 +3718,6 @@ static void sendOffered( const char *what, const char *from ) {
       sprintf( s4, "%lu bytes", (unsigned long)ImgBytes );
       lines[nl++] = s4;
     }
-    else if ( isRemoteRoot( Left.path ) ) {
-      lines[nl++] = "(the host makes a new folder for them)";
-    }
 
     if ( !uiDialog( "Send to the host", lines, nl, 1 ) ) return;
   }

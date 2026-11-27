@@ -165,7 +165,7 @@ func consoleAsker() func(context.Context, OfferInfo) bool {
 			<-lines
 		}
 		fmt.Printf("\n%s wants to send %d files, %s.\n", info.Remote, info.Files, humanBytes(info.Bytes))
-		fmt.Printf("They would go into the folder %s\n", info.Dest)
+		fmt.Printf("They would go into the inbox folder \\%s\n", info.Dest)
 		if info.Free >= 0 {
 			fmt.Printf("Free disk space: %s\n", humanBytes(info.Free))
 		}

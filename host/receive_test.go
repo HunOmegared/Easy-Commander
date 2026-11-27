@@ -228,10 +228,7 @@ func TestReceiveBasic(t *testing.T) {
 		t.Fatalf("end: %s", end)
 	}
 
-	sess := onlyChild(t, h.rx.cfg.Dir)
-	if !strings.HasPrefix(filepath.Base(sess), "486_C_") {
-		t.Errorf("folder name %q", filepath.Base(sess))
-	}
+	sess := h.rx.cfg.Dir
 	if readFile(t, filepath.Join(sess, "README.TXT")) != "hello" ||
 		readFile(t, filepath.Join(sess, "SUB", "ONE.TXT")) != "one" ||
 		readFile(t, filepath.Join(sess, "SUB", "DEEP", "BIG.BIN")) != big {
@@ -262,7 +259,7 @@ func TestReceiveBasic(t *testing.T) {
 	}
 }
 
-func TestReceiveSecondSessionNeverOverwrites(t *testing.T) {
+func TestReceiveSecondSendNeverOverwrites(t *testing.T) {
 	files := []fakeFile{ff("A.TXT", "first")}
 	h, port := startRx(t, InboxConfig{}, nil)
 	for i := 0; i < 2; i++ {
@@ -274,7 +271,7 @@ func TestReceiveSecondSessionNeverOverwrites(t *testing.T) {
 	}
 	es, _ := os.ReadDir(h.rx.cfg.Dir)
 	if len(es) != 2 {
-		t.Fatalf("expected two session folders, got %d", len(es))
+		t.Fatalf("expected the file and the report, got %d", len(es))
 	}
 }
 
@@ -288,7 +285,7 @@ func TestReceiveClientErrorFailsOnlyThatFile(t *testing.T) {
 	if end := c.serve(files); end != "END 2 1 0" {
 		t.Fatalf("end: %s", end)
 	}
-	sess := onlyChild(t, h.rx.cfg.Dir)
+	sess := h.rx.cfg.Dir
 	if readFile(t, filepath.Join(sess, "Z.TXT")) != "z" {
 		t.Error("the file after the failed one was not received")
 	}
@@ -442,7 +439,7 @@ func TestReceiveAsk(t *testing.T) {
 	}
 	c.serve(files)
 	mu.Lock()
-	if seen.Files != 1 || seen.Bytes != 5 || seen.Label != "PC" || seen.Remote != "127.0.0.1" || !strings.HasPrefix(seen.Dest, "PC_") {
+	if seen.Files != 1 || seen.Bytes != 5 || seen.Label != "PC" || seen.Remote != "127.0.0.1" || seen.Dest != "" {
 		t.Errorf("what the person was shown: %+v", seen)
 	}
 	answer = false
@@ -452,8 +449,8 @@ func TestReceiveAsk(t *testing.T) {
 		t.Errorf("declined: %s", st)
 	}
 	es, _ := os.ReadDir(h.rx.cfg.Dir)
-	if len(es) != 1 {
-		t.Errorf("a declined offer must not create a folder, got %d", len(es))
+	if len(es) != 2 { // README of the first (accepted) offer + its report; nothing new
+		t.Errorf("a declined offer must not write anything, got %d", len(es))
 	}
 
 	// Ask on, but nobody to ask: refuse
@@ -516,7 +513,7 @@ func TestReceiveRefusesBadNames(t *testing.T) {
 		if !strings.HasPrefix(end, "ABORT") {
 			t.Errorf("%q should be refused, got %q", name, end)
 		}
-		sess := onlyChild(t, h.rx.cfg.Dir)
+		sess := h.rx.cfg.Dir
 		var found []string
 		filepath.Walk(h.rx.cfg.Dir, func(p string, i os.FileInfo, err error) error {
 			if err == nil && !i.IsDir() && !strings.HasSuffix(p, reportName) {
@@ -676,22 +673,18 @@ func TestInboxBrowse(t *testing.T) {
 		t.Fatalf("end: %s", end)
 	}
 	c.send("ILIST \\")
-	if l := c.line(); l != "OK 1" {
+	if l := c.line(); l != "OK 3" { // README.TXT, SUB and the report
 		t.Fatalf("ILIST root: %s", l)
-	}
-	row := c.line()
-	if !strings.HasPrefix(row, "D\t") {
-		t.Fatalf("session folder: %q", row)
-	}
-	sess := strings.Split(row, "\t")[1] // the DOS name the client sees (BOX_20~1)
-	c.send("ILIST \\" + sess)
-	if l := c.line(); l != "OK 3" {
-		t.Fatalf("ILIST session: %s", l)
 	}
 	for i := 0; i < 3; i++ {
 		c.line()
 	}
-	c.send("IGET \\" + sess + "\\README.TXT")
+	c.send("ILIST \\SUB")
+	if l := c.line(); l != "OK 1" {
+		t.Fatalf("ILIST SUB: %s", l)
+	}
+	c.line()
+	c.send("IGET \\README.TXT")
 	if l := c.line(); l != "OK 5 5" {
 		t.Fatalf("IGET: %s", l)
 	}
@@ -918,34 +911,5 @@ func TestResumeChecksTheWholeFile(t *testing.T) {
 	files[0].badCRC = true
 	if end := send(); end != "END 0 1 0" {
 		t.Fatalf("bad crc: %s", end)
-	}
-}
-
-// An interrupted transfer to the inbox root goes on in the folder it started (same label).
-func TestResumeAtRootReusesFolder(t *testing.T) {
-	data := strings.Repeat("0123456789abcdef", 6000)
-	h, port := startRx(t, InboxConfig{Reserve: 0}, nil)
-	old := filepath.Join(h.rx.cfg.Dir, "PC1_20250101_1200")
-	os.Mkdir(old, 0o755)
-	os.WriteFile(filepath.Join(old, "BIG.BIN.part"), []byte(data[:40000]), 0o644)
-	other := filepath.Join(h.rx.cfg.Dir, "OTHER_20250101_1200")
-	os.Mkdir(other, 0o755)
-	os.WriteFile(filepath.Join(other, "BIG.BIN.part"), []byte("x"), 0o644)
-
-	c := dial(t, port)
-	files := []fakeFile{ff("BIG.BIN", data)}
-	n, total := counts(files)
-	c.send(fmt.Sprintf(`OFFER %d %d \ PC1`, n, total))
-	if st := c.status(); st != "OK" {
-		t.Fatalf("offer: %s", st)
-	}
-	if end := c.serve(files); end != "END 1 0 0" {
-		t.Fatalf("end: %s", end)
-	}
-	if readFile(t, filepath.Join(old, "BIG.BIN")) != data {
-		t.Error("not resumed in the old folder")
-	}
-	if len(c.gets) == 0 || !strings.HasPrefix(c.gets[0], `GET \BIG.BIN 40000 `) {
-		t.Errorf("first GET: %v", c.gets)
 	}
 }

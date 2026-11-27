@@ -11,8 +11,9 @@ package main
 // that decides what lands on the disk is therefore checked here, on the host,
 // and nothing the client says is trusted:
 //
-//   - files go into a new folder of their own below the inbox folder, never
-//     into the shared folder and never over an existing file
+//   - files go into the folder the client chose inside the inbox (the inbox
+//     itself at the root), never into the shared folder and never over an
+//     existing file
 //   - every name must be a plain DOS 8.3 name (no "..", no device names)
 //   - a file is written as NAME.EXT.part and renamed when it is complete
 //   - the number of bytes is limited by what was offered, by the quota of the
@@ -87,7 +88,7 @@ type OfferInfo struct {
 	Label  string
 	Files  int
 	Bytes  int64
-	Dest   string // name of the folder that will be created
+	Dest   string // folder inside the inbox they go into ("" = the inbox itself)
 	Free   int64  // free disk space (-1 = unknown)
 	Used   int64  // bytes already in the inbox
 	Quota  int64
@@ -364,52 +365,6 @@ func dirSize(dir string) int64 {
 		return nil
 	})
 	return n
-}
-
-// makeSessionDir creates base/name, or base/name_2, name_3 ... when it exists.
-// resumableDir returns the newest folder "<label>_<date>_<time>[_n]" in base that holds
-// an unfinished .part file (and nothing else is needed to resume), or "".
-func resumableDir(base, label string) string {
-	ents, err := os.ReadDir(base)
-	if err != nil {
-		return ""
-	}
-	best := ""
-	for _, e := range ents {
-		if !e.IsDir() || !strings.HasPrefix(e.Name(), label+"_") || e.Name() <= best {
-			continue
-		}
-		found := false
-		filepath.WalkDir(filepath.Join(base, e.Name()), func(p string, d fs.DirEntry, err error) error {
-			if err == nil && !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".part") {
-				found = true
-				return filepath.SkipAll
-			}
-			return nil
-		})
-		if found {
-			best = e.Name()
-		}
-	}
-	return best
-}
-
-func makeSessionDir(base, name string) (string, error) {
-	for i := 1; i < 100; i++ {
-		n := name
-		if i > 1 {
-			n = fmt.Sprintf("%s_%d", name, i)
-		}
-		p := filepath.Join(base, n)
-		err := os.Mkdir(p, 0o755)
-		if err == nil {
-			return p, nil
-		}
-		if !os.IsExist(err) {
-			return "", err
-		}
-	}
-	return "", fmt.Errorf("too many folders named %s", name)
 }
 
 var reservedDOS = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NUL": true, "CLOCK$": true}
@@ -800,15 +755,7 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 		return true
 	}
 
-	dest := fmt.Sprintf("%s_%s", label, time.Now().Format("20060102_1504"))
-	resumeInto := ""
-	if atRoot {
-		// An interrupted transfer of the same label left a .part file: go on in that folder.
-		resumeInto = resumableDir(cfg.Dir, label)
-		if resumeInto != "" {
-			dest = resumeInto
-		}
-	}
+	dest := ""
 	if !atRoot {
 		if rel, err := filepath.Rel(cfg.Dir, destReal); err == nil {
 			dest = rel
@@ -867,16 +814,8 @@ func (h *Host) handleOffer(conn net.Conn, r *bufio.Reader, w *bufio.Writer, arg 
 	}
 
 	sdir := destReal
-	if atRoot && resumeInto != "" {
-		sdir = filepath.Join(cfg.Dir, resumeInto)
-	} else if atRoot {
-		var err error
-		sdir, err = makeSessionDir(cfg.Dir, dest)
-		if err != nil {
-			logf("cannot create the folder for %s: %v", ta.IP, err)
-			writeErr(w, errCantCreate)
-			return true
-		}
+	if atRoot {
+		sdir = cfg.Dir
 	} else if st, err := os.Stat(sdir); err != nil || !st.IsDir() {
 		writeErr(w, errNotFound)
 		return true

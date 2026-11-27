@@ -728,7 +728,7 @@ var closeBoxCallback = syscall.NewCallback(func(hwnd, lparam uintptr) uintptr {
 })
 
 func guiConfirm(ctx context.Context, info OfferInfo) bool {
-	text := fmt.Sprintf("%s wants to send %d files (%s).\n\nThey will go into the new folder\n%s\n\n",
+	text := fmt.Sprintf("%s wants to send %d files (%s).\n\nThey will go into the folder\n%s\n\n",
 		info.Remote, info.Files, humanBytes(info.Bytes), filepath.Join(host.InboxDir, info.Dest))
 	if info.Free >= 0 {
 		text += "Free disk space: " + humanBytes(info.Free) + "\n"
