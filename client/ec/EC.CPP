@@ -607,7 +607,11 @@ static int parseNumber( const char *s, int len ) {
   return v;
 }
 
-// Splits "D<tab>NAME<tab>size<tab>YYYYMMDD<tab>HHMM" (the line is changed).
+// Seconds and attributes of the last parsed line (newer hosts add them: ...HHMM<tab>SS<tab>ATTR).
+static u8 ListSec;
+static u8 ListAttr;
+
+// Splits "D<tab>NAME<tab>size<tab>YYYYMMDD<tab>HHMM[<tab>SS<tab>ATTR]" (the line is changed).
 static int parseListLine( char *line, u8 *isDir, char **name, u32 *size, u16 *date, u16 *time ) {
 
   char *t1 = strchr( line, '\t' );
@@ -632,6 +636,24 @@ static int parseListLine( char *line, u8 *isDir, char **name, u32 *size, u16 *da
 
   const char *d = t3 + 1;
   const char *tm = t4 + 1;
+
+  ListSec = 0;
+  ListAttr = 0;
+
+  {
+    char *t5 = strchr( t4 + 1, '\t' );             // after HHMM
+    if ( t5 != NULL ) {
+      *t5 = 0;
+      char *t6 = strchr( t5 + 1, '\t' );
+      if ( t6 != NULL ) {
+        *t6 = 0;
+        unsigned long sc = strtoul( t5 + 1, NULL, 10 );
+        unsigned long at = strtoul( t6 + 1, NULL, 10 );
+        ListSec  = (u8)((sc > 59) ? 0 : sc);
+        ListAttr = (u8)(at & 0x27);
+      }
+    }
+  }
 
   if ( (strlen( d ) < 8) || (strlen( tm ) < 4) ) {
     *date = 0;
@@ -701,7 +723,12 @@ static int fetchRemoteList( const char *path, Panel *dst ) {
     u16 date, time;
 
     if ( parseListLine( line, &isDir, &name, &size, &date, &time ) ) {
+      int before = dst->count;
       addItem( dst, name, isDir, size, date, time );
+      if ( dst->count > before ) {
+        dst->items[before].sec  = ListSec;
+        dst->items[before].attr = ListAttr;
+      }
     }
   }
 
@@ -1445,7 +1472,7 @@ static int appendTree( const char *remoteDir, const char *prefix ) {
     }
 
     sprintf( rel, "%s\\%s", prefix, name );
-    addEntry( isDir ? 'D' : 'F', rel, size, date, time );
+    addEntryEx( isDir ? 'D' : 'F', rel, size, date, time, ListSec, ListAttr );
   }
 
   return 0;
@@ -1475,7 +1502,7 @@ static int buildList( Panel *p ) {
 
       char remote[300];
 
-      addEntry( 'D', it->name, 0, it->date, it->time );
+      addEntryEx( 'D', it->name, 0, it->date, it->time, it->sec, it->attr );
       joinPath( remote, p->path, it->name );
 
       int rc = appendTree( remote, it->name );
@@ -1486,7 +1513,7 @@ static int buildList( Panel *p ) {
       }
     }
     else {
-      addEntry( 'F', it->name, it->size, it->date, it->time );
+      addEntryEx( 'F', it->name, it->size, it->date, it->time, it->sec, it->attr );
     }
   }
 
@@ -1575,7 +1602,7 @@ static void progressUpdate( int force ) {
 // The file is requested in blocks.  After every block the session is in
 // a clean state, so Esc (and a full disk) can stop the transfer without
 // breaking the connection.
-static int downloadFile( const char *remote, const char *localName, u32 *gotOut, u16 date, u16 time ) {
+static int downloadFile( const char *remote, const char *localName, u32 *gotOut, u16 date, u16 time, u8 sec, u8 attr ) {
 
   char line[300];
   char cmd[300];
@@ -1586,6 +1613,8 @@ static int downloadFile( const char *remote, const char *localName, u32 *gotOut,
     ErrMsg = "path too long";
     return FETCH_SKIP;
   }
+
+  _dos_setfileattr( localName, _A_NORMAL );       // an old read-only copy may be replaced
 
   FILE *f = fopen( localName, "wb" );
   if ( f == NULL ) {
@@ -1685,7 +1714,7 @@ static int downloadFile( const char *remote, const char *localName, u32 *gotOut,
 
   if ( rc == FETCH_OK ) {
     flushRc = fflush( f );
-    if ( (flushRc == 0) && (date != 0) ) _dos_setftime( fileno( f ), date, time );
+    if ( (flushRc == 0) && (date != 0) ) _dos_setftime( fileno( f ), date, (u16)((time & 0xFFE0) | (sec / 2)) );
   }
 
   // Closing can fail too (disk full).
@@ -1696,6 +1725,8 @@ static int downloadFile( const char *remote, const char *localName, u32 *gotOut,
     rc = FETCH_DISK;
     ErrMsg = "cannot write to the disk (full?)";
   }
+
+  if ( (rc == FETCH_OK) && attr ) _dos_setfileattr( localName, attr );
 
   if ( (rc == FETCH_OK) && (offset < total) ) {
     rc = FETCH_SKIP;
@@ -2528,6 +2559,8 @@ static void cmdDownload( void ) {
     char type = TreeBuf[pos];
     u32 sz;
     u16 fdate, ftime;
+    u8 fsec = TreeBuf[pos + 9];
+    u8 fattr = TreeBuf[pos + 10];
     memcpy( &sz, TreeBuf + pos + 1, 4 );
     memcpy( &fdate, TreeBuf + pos + 5, 2 );
     memcpy( &ftime, TreeBuf + pos + 7, 2 );
@@ -2579,7 +2612,7 @@ static void cmdDownload( void ) {
     joinPath( remote, Left.path, rel );
 
     u32 got = 0;
-    int r = downloadFile( remote, local, &got, fdate, ftime );
+    int r = downloadFile( remote, local, &got, fdate, ftime, fsec, fattr );
 
     if ( r == FETCH_OK ) {
       okFiles++;

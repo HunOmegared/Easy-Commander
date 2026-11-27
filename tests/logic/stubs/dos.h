@@ -42,7 +42,8 @@ static inline unsigned _dos_findfirst(const char *pat, unsigned, struct find_t *
   fill_stat(fb,p,"X"); return 0;
 }
 static inline unsigned _dos_findnext(struct find_t *fb){ return fill_ft(fb);}
-static inline unsigned _dos_setfileattr(const char *p, unsigned){ std::string s=p; for(auto &c:s) if(c=='\\') c='/'; chmod(s.c_str(),0644); return 0; }
+static std::vector<unsigned> g_attrs;
+static inline unsigned _dos_setfileattr(const char *p, unsigned a){ if(a!=0) g_attrs.push_back(a); std::string s=p; for(auto &c:s) if(c=='\\') c='/'; chmod(s.c_str(),0644); return 0; }
 // drives: A, C and D exist; D: is "not ready"
 static unsigned g_drive=3;
 static inline void _dos_getdrive(unsigned *d){ *d=g_drive; }

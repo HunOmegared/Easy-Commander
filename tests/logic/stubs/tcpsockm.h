@@ -42,7 +42,7 @@ static void fh_tree(const std::string&dir,const std::string&rel,std::vector<std:
   std::vector<std::string> names=fh_names(dir);
   for(int pass=0;pass<2;pass++) for(size_t i=0;i<names.size();i++){ bool isd=fh_isdir(dir+"/"+names[i]); if((pass==0)!=isd) continue;
     std::string r=rel.empty()?names[i]:rel+"\\"+names[i]; struct stat st; stat((dir+"/"+names[i]).c_str(),&st);
-    char buf[300]; snprintf(buf,sizeof buf,"%c\t%s\t%ld\t20261101\t1048\r\n",isd?'D':'F',r.c_str(),isd?0L:(long)st.st_size); out.push_back(buf);
+    char buf[300]; snprintf(buf,sizeof buf,"%c\t%s\t%ld\t20261101\t1048\t30\t%d\r\n",isd?'D':'F',r.c_str(),isd?0L:(long)st.st_size,isd?0:33); out.push_back(buf);
     if(isd) fh_tree(dir+"/"+names[i],r,out); }
 }
 static void fh_command(const std::string &cmd){
@@ -61,7 +61,7 @@ static void fh_command(const std::string &cmd){
       if(!fh_isdir(full)){ fh_send("ERR 404 Not found\r\n",none); return; }
       std::vector<std::string> lines;
       if(verb=="TREE") fh_tree(full,"",lines);
-      else { std::vector<std::string> names=fh_names(full); for(int pass=0;pass<2;pass++) for(size_t i=0;i<names.size();i++){ bool isd=fh_isdir(full+"/"+names[i]); if((pass==0)!=isd) continue; struct stat st; stat((full+"/"+names[i]).c_str(),&st); char buf[300]; snprintf(buf,sizeof buf,"%c\t%s\t%ld\t20261101\t1048\r\n",isd?'D':'F',names[i].c_str(),isd?0L:(long)st.st_size); lines.push_back(buf);} }
+      else { std::vector<std::string> names=fh_names(full); for(int pass=0;pass<2;pass++) for(size_t i=0;i<names.size();i++){ bool isd=fh_isdir(full+"/"+names[i]); if((pass==0)!=isd) continue; struct stat st; stat((full+"/"+names[i]).c_str(),&st); char buf[300]; snprintf(buf,sizeof buf,"%c\t%s\t%ld\t20261101\t1048\t30\t%d\r\n",isd?'D':'F',names[i].c_str(),isd?0L:(long)st.st_size,isd?0:33); lines.push_back(buf);} }
       char h[64]; if(verb=="TREE"){ long tot=0; for(size_t i=0;i<lines.size();i++){ if(lines[i][0]=='F'){ size_t a=lines[i].find('\t',2); tot+=atol(lines[i].c_str()+a+1);} } snprintf(h,sizeof h,"OK %zu %ld\r\n",lines.size(),tot);} else snprintf(h,sizeof h,"OK %zu\r\n",lines.size());
       std::string all=h; for(size_t i=0;i<lines.size();i++) all+=lines[i]; fh_send(all,none); return; }
     std::vector<uint8_t> data; if(fh_isdir(full)||!fh_read(full,data)){ fh_send(fh_isdir(full)?"ERR 406 Is a folder, use TREE\r\n":"ERR 404 Not found\r\n",none); return; }

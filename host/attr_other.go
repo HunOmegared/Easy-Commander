@@ -13,3 +13,11 @@ func setAttrs(path string, attr uint8) {
 		}
 	}
 }
+
+// fileAttrs: only "read-only" exists outside Windows.
+func fileAttrs(info os.FileInfo) uint8 {
+	if info.Mode().IsRegular() && info.Mode().Perm()&0o200 == 0 {
+		return 1
+	}
+	return 0
+}

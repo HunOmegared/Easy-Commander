@@ -3,7 +3,7 @@
 // Protocol (text commands, CRLF-terminated lines):
 //
 //	HELLO            -> OK EASYCOMMANDER 1
-//	LIST <path>      -> OK <n>, then n lines: <D|F>\t<NAME>\t<size>\t<YYYYMMDD>\t<HHMM>
+//	LIST <path>      -> OK <n>, then n lines: <D|F>\t<NAME>\t<size>\t<YYYYMMDD>\t<HHMM>[\t<SS>\t<ATTR>]
 //	GET <path> [offset [length]]
 //	                 -> OK <n> <filesize>, then exactly <n> raw bytes, where n is
 //	                    the part of the file from offset (at most length bytes)
@@ -86,6 +86,7 @@ type entry struct {
 	Dir  bool
 	Size int64
 	Mod  time.Time
+	Attr uint8 // DOS attributes (read-only 1, hidden 2, system 4, archive 32)
 }
 
 const dosPunct = "!#$%&'()-@^_`{}~"
@@ -214,7 +215,7 @@ func listDir(dir string) ([]entry, error) {
 		if !info.IsDir() && !info.Mode().IsRegular() {
 			continue
 		}
-		es = append(es, entry{Real: name, Dir: info.IsDir(), Size: info.Size(), Mod: info.ModTime()})
+		es = append(es, entry{Real: name, Dir: info.IsDir(), Size: info.Size(), Mod: info.ModTime(), Attr: fileAttrs(info)})
 	}
 	assignNames(es)
 	return es, nil
@@ -310,7 +311,7 @@ func (s *server) cmdList(w *bufio.Writer, arg string) {
 			kind, size = "D", 0
 		}
 		d, t := dosStamp(e.Mod)
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\r\n", kind, e.DOS, size, d, t)
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%d\t%d\r\n", kind, e.DOS, size, d, t, e.Mod.Local().Second(), e.Attr)
 	}
 	w.Flush()
 }
@@ -330,6 +331,7 @@ type treeItem struct {
 	Rel  string // DOS path relative to the requested folder, backslash-separated
 	Size int64
 	Mod  time.Time
+	Attr uint8
 }
 
 // walkTree collects every folder and file below dir, depth first. A folder
@@ -358,7 +360,7 @@ func walkTree(dir, rel string, depth int, items *[]treeItem, total *int64) error
 		if rel != "" {
 			r = rel + `\` + e.DOS
 		}
-		*items = append(*items, treeItem{Dir: e.Dir, Rel: r, Size: e.Size, Mod: e.Mod})
+		*items = append(*items, treeItem{Dir: e.Dir, Rel: r, Size: e.Size, Mod: e.Mod, Attr: e.Attr})
 		if e.Dir {
 			if err := walkTree(filepath.Join(dir, e.Real), r, depth+1, items, total); err != nil {
 				return err
@@ -393,7 +395,7 @@ func (s *server) cmdTree(w *bufio.Writer, arg string) {
 			kind, size = "D", 0
 		}
 		d, t := dosStamp(it.Mod)
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\r\n", kind, it.Rel, size, d, t)
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%d\t%d\r\n", kind, it.Rel, size, d, t, it.Mod.Local().Second(), it.Attr)
 	}
 	w.Flush()
 }

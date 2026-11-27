@@ -20,18 +20,23 @@ be a name the host listed; `..` is rejected.
 Lists one folder. An empty path means the root.
 
     OK <count>
-    <D|F> TAB <NAME> TAB <size> TAB <YYYYMMDD> TAB <HHMM>        (count lines)
+    <D|F> TAB <NAME> TAB <size> TAB <YYYYMMDD> TAB <HHMM> [TAB <SS> TAB <ATTR>]   (count lines)
 
 Folders first, then files, each sorted by name. A folder has size 0. Date and
 time are the host's local time; dates before 1980 or after 2099 become
 `19800101 0000`.
+
+The optional last two fields (newer hosts; a parser that does not know them ignores
+them) are the seconds of the time (0-59) and the DOS attributes as a number
+(read-only 1, hidden 2, system 4, archive 32). The client sets them on the files it
+downloads. The same two fields are used in the lists the client sends for an `OFFER`.
 
 ### `TREE <path>`
 
 Lists a folder and everything below it.
 
     OK <count> <total size of all files>
-    <D|F> TAB <relative path> TAB <size> TAB <YYYYMMDD> TAB <HHMM>
+    <D|F> TAB <relative path> TAB <size> TAB <YYYYMMDD> TAB <HHMM> [TAB <SS> TAB <ATTR>]
 
 Paths are relative to `<path>` and use `\`. A folder is always listed before its
 contents; empty folders are included. Limits: 32 levels, 50 000 entries.

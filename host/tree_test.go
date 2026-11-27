@@ -67,3 +67,21 @@ func TestResolveTreePathsAndTraversal(t *testing.T) {
 		t.Fatalf("traversal not rejected: %v", err)
 	}
 }
+
+// The list carries the attributes (read-only is known everywhere).
+func TestListCarriesAttributes(t *testing.T) {
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "ro.txt"), []byte("x"), 0o444)
+	os.WriteFile(filepath.Join(root, "rw.txt"), []byte("x"), 0o644)
+	es, err := listDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]uint8{}
+	for _, e := range es {
+		got[e.Real] = e.Attr & 1
+	}
+	if got["ro.txt"] != 1 || got["rw.txt"] != 0 {
+		t.Errorf("attributes: %v", got)
+	}
+}
