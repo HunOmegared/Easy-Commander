@@ -2946,6 +2946,17 @@ static void imgScan( void ) {
   }
 }
 
+#ifndef EC_FAKE_DISK
+static void imgFreeSeg( unsigned seg ) {          // INT 21h function 49h
+  union REGS r;
+  struct SREGS sr;
+  segread( &sr );
+  sr.es = seg;
+  r.h.ah = 0x49;
+  int86x( 0x21, &r, &r, &sr );
+}
+#endif
+
 // Memory for the BIOS to read into: it must not cross a 64 KB border.
 static int imgAlloc( void ) {
 
@@ -2955,7 +2966,14 @@ static int imgAlloc( void ) {
 #else
   unsigned seg = 0;
 
-  if ( _dos_allocmem( 2048, &seg ) != 0 ) return 0;       // 32 KB
+  {                                                       // 32 KB, INT 21h function 48h
+    union REGS r;
+    r.h.ah = 0x48;
+    r.x.bx = 2048;
+    int86( 0x21, &r, &r );
+    if ( r.x.cflag ) return 0;
+    seg = r.x.ax;
+  }
 
   ImgSeg = seg;
 
@@ -2974,7 +2992,7 @@ static int imgAlloc( void ) {
 #ifdef EC_FAKE_DISK
     if ( ImgWin ) { free( ImgWin ); ImgWin = NULL; }
 #else
-    if ( ImgSeg ) { _dos_freemem( ImgSeg ); ImgSeg = 0; }
+    if ( ImgSeg ) { imgFreeSeg( ImgSeg ); ImgSeg = 0; }
 #endif
     return 0;
   }
@@ -2988,7 +3006,7 @@ static void imgFree( void ) {
 #ifdef EC_FAKE_DISK
   if ( ImgWin ) { free( ImgWin ); ImgWin = NULL; }
 #else
-  if ( ImgSeg ) { _dos_freemem( ImgSeg ); ImgSeg = 0; }
+  if ( ImgSeg ) { imgFreeSeg( ImgSeg ); ImgSeg = 0; }
   ImgWin = NULL;
 #endif
   ImgDisk = NULL;
