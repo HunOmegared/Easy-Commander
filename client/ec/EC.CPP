@@ -795,10 +795,7 @@ static int loadLocal( Panel *p ) {
 
   sprintf( pattern, "%s%s*.*", p->path, (p->path[len-1] == '\\') ? "" : "\\" );
 
-  unsigned mask = _A_SUBDIR | _A_RDONLY | _A_ARCH;
-#ifdef EC_UPLOAD
-  if ( UploadMode ) mask |= _A_HIDDEN | _A_SYSTEM;     // a backup needs them
-#endif
+  unsigned mask = _A_SUBDIR | _A_RDONLY | _A_ARCH | _A_HIDDEN | _A_SYSTEM;   // hidden and system files are shown too
 
   unsigned rc = _dos_findfirst( pattern, mask, &fb );
 
