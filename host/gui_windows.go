@@ -196,7 +196,7 @@ const (
 )
 
 const windowClass = "EasyCommanderHost"
-const windowTitle = "Easy Commander host"
+const windowTitle = "Easy Commander host" + titleSuffix
 
 // call runs a Windows function. Arguments are numbers or pointers (*uint16
 // text, unsafe.Pointer to a structure); they stay alive until it returns.
@@ -514,18 +514,21 @@ func createControls() {
 	hBtnStart = control("BUTTON", "Start sharing", bsPushButton|wsTabStop, 0, 12, 128, 140, 30, idStart)
 	hLblStatus = control("STATIC", "", ssNoPrefix, 0, 168, 135, 300, 20, 0)
 
-	control("STATIC", "Inbox folder (what the DOS client sends arrives here):", ssNoPrefix, 0, 12, 176, 456, 18, 0)
-	hEdInbox = control("EDIT", "", esAutoHScroll|wsTabStop, wsExClientEdge, 12, 196, 372, 24, idInFolder)
-	call(pSendMessageW, hEdInbox, emSetLimit, 259, 0)
-	hBtnInBrowse = control("BUTTON", "Browse...", bsPushButton|wsTabStop, 0, 392, 195, 76, 26, idInBrowse)
+	if !readOnlyBuild { // the read-only build has no receiving at all
+		control("STATIC", "Inbox folder (what the DOS client sends arrives here):", ssNoPrefix, 0, 12, 176, 456, 18, 0)
+		hEdInbox = control("EDIT", "", esAutoHScroll|wsTabStop, wsExClientEdge, 12, 196, 372, 24, idInFolder)
+		call(pSendMessageW, hEdInbox, emSetLimit, 259, 0)
+		hBtnInBrowse = control("BUTTON", "Browse...", bsPushButton|wsTabStop, 0, 392, 195, 76, 26, idInBrowse)
 
-	control("STATIC", "Quota (like 500 MB or 4 GB, 0 = no limit):", ssNoPrefix, 0, 12, 232, 250, 18, 0)
-	hEdQuota = control("EDIT", "", esAutoHScroll|wsTabStop, wsExClientEdge, 12, 252, 120, 24, idQuota)
-	call(pSendMessageW, hEdQuota, emSetLimit, 20, 0)
-	hChkAsk = control("BUTTON", "Ask me before every transfer", bsAutoCheckbox|wsTabStop, 0, 160, 254, 250, 22, idAsk)
+		control("STATIC", "Quota (like 500 MB or 4 GB, 0 = no limit):", ssNoPrefix, 0, 12, 232, 250, 18, 0)
+		hEdQuota = control("EDIT", "", esAutoHScroll|wsTabStop, wsExClientEdge, 12, 252, 120, 24, idQuota)
+		call(pSendMessageW, hEdQuota, emSetLimit, 20, 0)
+		hChkAsk = control("BUTTON", "Ask me before every transfer", bsAutoCheckbox|wsTabStop, 0, 160, 254, 250, 22, idAsk)
 
-	hBtnRx = control("BUTTON", "Start receiving", bsPushButton|wsTabStop, 0, 12, 292, 140, 30, idRxStart)
-	hLblRx = control("STATIC", "", ssNoPrefix, 0, 168, 299, 300, 20, 0)
+		hBtnRx = control("BUTTON", "Start receiving", bsPushButton|wsTabStop, 0, 12, 292, 140, 30, idRxStart)
+		hLblRx = control("STATIC", "", ssNoPrefix, 0, 168, 299, 300, 20, 0)
+
+	}
 
 	control("STATIC", "Address to type into the DOS client:", ssNoPrefix, 0, 12, 336, 456, 18, 0)
 	hLblIPs = control("STATIC", "", ssNoPrefix, 0, 12, 356, 456, 40, 0)

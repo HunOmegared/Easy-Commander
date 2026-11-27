@@ -116,3 +116,12 @@ configuration (the `MTCPCFG` environment variable, see the mTCP documentation).
 
 The DOS sources use CRLF, the Go and shell files use LF. `.gitattributes` takes
 care of that; do not convert the DOS sources to LF.
+
+## Read-only host
+
+`go build -tags readonly` (or `host\build-windows-readonly.bat`) builds a host that can
+only **share** a folder. The receiving code (`receive.go`: `OFFER`, the inbox, creating
+folders, writing files) is not compiled in at all, so nothing can be written for a
+client, whatever it sends. The window has no receiving section and its title says
+"(read-only)". `go test -tags readonly` checks that the upload commands are refused
+and that `HELLO` does not offer `UPLOAD`.
