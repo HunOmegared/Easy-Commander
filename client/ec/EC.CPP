@@ -126,6 +126,8 @@ typedef struct {
   u16  time;                 // DOS packed time
   u8   isDir;
   u8   sel;
+  u8   sec;                  // seconds of the time (DOS keeps 2 s steps), only for local items
+  u8   attr;                 // DOS attributes (read-only 1, hidden 2, system 4, archive 32), local items
 } Item;
 
 typedef struct {
@@ -342,6 +344,8 @@ static void addItem( Panel *p, const char *name, u8 isDir, u32 size, u16 date, u
   it->date  = date;
   it->time  = time;
   it->sel   = 0;
+  it->sec   = 0;
+  it->attr  = 0;
   p->count++;
 }
 
@@ -763,7 +767,12 @@ static int loadLocal( Panel *p ) {
 
   sprintf( pattern, "%s%s*.*", p->path, (p->path[len-1] == '\\') ? "" : "\\" );
 
-  unsigned rc = _dos_findfirst( pattern, _A_SUBDIR | _A_RDONLY | _A_ARCH, &fb );
+  unsigned mask = _A_SUBDIR | _A_RDONLY | _A_ARCH;
+#ifdef EC_UPLOAD
+  if ( UploadMode ) mask |= _A_HIDDEN | _A_SYSTEM;     // a backup needs them
+#endif
+
+  unsigned rc = _dos_findfirst( pattern, mask, &fb );
 
   // 2 and 18 only mean "no files here"; anything else is a real problem.
   if ( (rc != 0) && (rc != 2) && (rc != 18) ) {
@@ -773,7 +782,12 @@ static int loadLocal( Panel *p ) {
   while ( rc == 0 ) {
 
     if ( strcmp( fb.name, "." ) && strcmp( fb.name, ".." ) ) {
+      int before = p->count;
       addItem( p, fb.name, (fb.attrib & _A_SUBDIR) ? 1 : 0, fb.size, fb.wr_date, fb.wr_time );
+      if ( p->count > before ) {
+        p->items[before].sec  = (u8)((fb.wr_time & 31) * 2);
+        p->items[before].attr = (u8)(fb.attrib & 0x27);
+      }
     }
 
     rc = _dos_findnext( &fb );
@@ -1339,9 +1353,9 @@ static int localInfo( const char *path, u32 *size ) {
 // ---- the list of things to download ----
 
 // An entry in the list: type (1 byte), size (4), DOS date (2), DOS time (2), name.
-#define ENTRY_HEAD 9
+#define ENTRY_HEAD 11            // type 1, size 4, date 2, time 2, seconds 1, attributes 1
 
-static void addEntry( char type, const char *rel, u32 size, u16 date, u16 time ) {
+static void addEntryEx( char type, const char *rel, u32 size, u16 date, u16 time, u8 sec, u8 attr ) {
 
   uint16_t relLen = (uint16_t)strlen( rel );
 
@@ -1359,6 +1373,8 @@ static void addEntry( char type, const char *rel, u32 size, u16 date, u16 time )
   memcpy( TreeBuf + TreeUsed + 1, &size, 4 );
   memcpy( TreeBuf + TreeUsed + 5, &date, 2 );
   memcpy( TreeBuf + TreeUsed + 7, &time, 2 );
+  TreeBuf[TreeUsed + 9]  = sec;
+  TreeBuf[TreeUsed + 10] = attr;
   memcpy( TreeBuf + TreeUsed + ENTRY_HEAD, rel, relLen + 1 );
   TreeUsed += ENTRY_HEAD + relLen + 1;
   TreeEntries++;
@@ -1370,6 +1386,10 @@ static void addEntry( char type, const char *rel, u32 size, u16 date, u16 time )
     TreeFiles++;
     TreeBytes += size;
   }
+}
+
+static void addEntry( char type, const char *rel, u32 size, u16 date, u16 time ) {
+  addEntryEx( type, rel, size, date, time, 0, 0 );
 }
 
 // Adds everything below a host folder (prefix is its name relative to the
@@ -2640,7 +2660,7 @@ static FILE     *UpFile = NULL;           // the file being sent (kept open betw
 static char      UpName[130];
 static u32       UpBase;                  // bytes of the files before the current one
 static u32       UpPrevSize;
-static unsigned long UpHostOk, UpHostFailed;   // from the host's END line
+static unsigned long UpHostOk, UpHostFailed, UpHostSame;   // from the host's END line
 static char      UpAbort[100];            // text of the host's ABORT line
 
 
@@ -2759,14 +2779,14 @@ static void appendLocalTree( int depth ) {
         strcat( UpRel, fb.name );
 
         if ( fb.attrib & _A_SUBDIR ) {
-          addEntry( 'D', UpRel, 0, fb.wr_date, fb.wr_time );
+          addEntryEx( 'D', UpRel, 0, fb.wr_date, fb.wr_time, (u8)((fb.wr_time & 31) * 2), (u8)(fb.attrib & 0x27) );
           strcat( UpDir, "\\" );
           strcat( UpDir, fb.name );
           appendLocalTree( depth + 1 );
           UpDir[dirLen] = 0;
         }
         else {
-          addEntry( 'F', UpRel, fb.size, fb.wr_date, fb.wr_time );
+          addEntryEx( 'F', UpRel, fb.size, fb.wr_date, fb.wr_time, (u8)((fb.wr_time & 31) * 2), (u8)(fb.attrib & 0x27) );
         }
 
         UpRel[relLen] = 0;
@@ -2797,7 +2817,7 @@ static void buildLocalList( Panel *p ) {
 
     if ( it->isDir ) {
 
-      addEntry( 'D', it->name, 0, it->date, it->time );
+      addEntryEx( 'D', it->name, 0, it->date, it->time, it->sec, it->attr );
 
       if ( strlen( p->path ) + 14 < sizeof( UpDir ) ) {
         joinPath( UpDir, p->path, it->name );
@@ -2809,7 +2829,7 @@ static void buildLocalList( Panel *p ) {
       }
     }
     else {
-      addEntry( 'F', it->name, it->size, it->date, it->time );
+      addEntryEx( 'F', it->name, it->size, it->date, it->time, it->sec, it->attr );
     }
   }
 }
@@ -2849,7 +2869,7 @@ static void upCloseFile( void ) {
 // The host asked "TREE \": send the whole offered list.
 static int upAnswerTree( void ) {
 
-  char line[200];
+  char line[260];
   uint16_t pos = 0;
 
   sprintf( line, "OK %lu %lu", TreeEntries, (unsigned long)TreeBytes );
@@ -2863,6 +2883,8 @@ static int upAnswerTree( void ) {
     memcpy( &sz, TreeBuf + pos + 1, 4 );
     memcpy( &d, TreeBuf + pos + 5, 2 );
     memcpy( &t, TreeBuf + pos + 7, 2 );
+    u8 secs = TreeBuf[pos + 9];
+    u8 attrs = TreeBuf[pos + 10];
     const char *rel = (const char *)(TreeBuf + pos + ENTRY_HEAD);
     pos += ENTRY_HEAD + (uint16_t)strlen( rel ) + 1;
 
@@ -2873,8 +2895,9 @@ static int upAnswerTree( void ) {
       year = 1980; month = 1; day = 1; hour = 0; minute = 0;
     }
 
-    sprintf( line, "%c\t%s\t%lu\t%04u%02u%02u\t%02u%02u", type, rel,
-             (type == 'D') ? 0UL : (unsigned long)sz, year, month, day, hour, minute );
+    sprintf( line, "%c\t%s\t%lu\t%04u%02u%02u\t%02u%02u\t%u\t%u", type, rel,
+             (type == 'D') ? 0UL : (unsigned long)sz, year, month, day, hour, minute,
+             (unsigned)((secs < 60) ? secs : 0), (unsigned)attrs );
 
     if ( txLine( line ) ) return -1;
   }
@@ -2985,6 +3008,43 @@ static int upAnswerGet( char *arg ) {
   return ProgCancel ? 1 : 0;
 }
 
+// The host asked "CRC \name": it resumes an interrupted transfer and checks the whole
+// file.  Only a file that was offered.  Reading a big file takes its time.
+static int upAnswerCrc( char *arg ) {
+
+  char rel[130];
+  char full[300];
+  char line[60];
+  char type;
+  u32 listed = 0;
+  u16 d, t;
+
+  const char *r = arg;
+  while ( (*r == '\\') || (*r == '/') ) r++;
+
+  if ( strlen( r ) >= sizeof( rel ) ) {
+    return txLine( "ERR 404 Not offered" ) || txFlush( ) ? -1 : 0;
+  }
+
+  strcpy( rel, r );
+  for ( char *c = rel; *c; c++ ) if ( *c == '/' ) *c = '\\';
+
+  if ( !offerFind( rel, &type, &listed, &d, &t ) || (type != 'F') ) {
+    return txLine( "ERR 404 Not offered" ) || txFlush( ) ? -1 : 0;
+  }
+
+  joinPath( full, Right.path, rel );
+
+  uint32_t crc = 0, size = 0;
+
+  if ( crcOfFile( full, &crc, &size ) != 0 ) {
+    return txLine( "ERR 403 Read error" ) || txFlush( ) ? -1 : 0;
+  }
+
+  sprintf( line, "OK %lu %08lX", (unsigned long)size, (unsigned long)crc );
+  return txLine( line ) || txFlush( ) ? -1 : 0;
+}
+
 // Plays the "host" for the swapped roles until the host's END or ABORT.
 // Returns 0 (END), 1 (cancelled here), 2 (connection lost), 3 (ABORT, text in UpAbort).
 static int serveOffer( void ) {
@@ -2992,7 +3052,7 @@ static int serveOffer( void ) {
   char line[300];
 
   UpAbort[0] = 0;
-  UpHostOk = UpHostFailed = 0;
+  UpHostOk = UpHostFailed = UpHostSame = 0;
   UpBase = 0;
   UpPrevSize = 0;
   UpName[0] = 0;
@@ -3009,7 +3069,8 @@ static int serveOffer( void ) {
     if ( strnicmp( line, "END", 3 ) == 0 ) {
       char *p = line + 3;
       UpHostOk = strtoul( p, &p, 10 );
-      UpHostFailed = strtoul( p, NULL, 10 );
+      UpHostFailed = strtoul( p, &p, 10 );
+      UpHostSame = strtoul( p, NULL, 10 );       // (old hosts do not send it)
       upCloseFile( );
       return 0;
     }
@@ -3029,8 +3090,11 @@ static int serveOffer( void ) {
     else if ( strnicmp( line, "GET ", 4 ) == 0 ) {
       rc = upAnswerGet( line + 4 );
     }
+    else if ( strnicmp( line, "CRC ", 4 ) == 0 ) {
+      rc = upAnswerCrc( line + 4 );
+    }
     else {
-      // CRC, LIST, anything else: nothing but the offered files is served.
+      // LIST, anything else: nothing but the offered files is served.
       rc = (txLine( "ERR 400 Not offered" ) || txFlush( )) ? -1 : 0;
     }
 
@@ -3063,6 +3127,7 @@ static void cmdUploadMode( void ) {
     Active = 0;
     Left.cur = 0;
     Left.top = 0;
+    reload( &Right );                    // hidden and system files go out of the list again
     return;
   }
 
@@ -3105,6 +3170,7 @@ static void cmdUploadMode( void ) {
   Left.cur = 0;
   Left.top = 0;
   Active = 1;                      // the files to send are in the local (right) panel
+  reload( &Right );                // a backup needs the hidden and system files too
 }
 
 // Waits for the host's answer to OFFER.  The host sends WAIT every 5 seconds
@@ -3291,7 +3357,7 @@ static void cmdSend( void ) {
     int nl = 0;
 
     if ( res == 0 ) {
-      sprintf( s1, "Received by the host: %lu   Failed: %lu", UpHostOk, UpHostFailed );
+      sprintf( s1, "Received: %lu   Unchanged: %lu   Failed: %lu", UpHostOk, UpHostSame, UpHostFailed );
     }
     else if ( res == 1 ) {
       strcpy( s1, "Cancelled. The host keeps what it already received." );

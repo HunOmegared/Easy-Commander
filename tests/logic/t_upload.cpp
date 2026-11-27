@@ -55,6 +55,8 @@ static bool takeLine(std::string &line) {
 }
 
 static std::vector<std::string> probeList;
+static std::string crcLine;
+static std::vector<std::string> treeLines;
 
 static void nextRequest() {
   if (probes < (int)probeList.size()) { sendTxt(probeList[probes] + "\r\n"); phase = 5; return; }
@@ -84,6 +86,7 @@ static void step() {
       if (treeLeft == 0) { cur = 0; nextRequest(); continue; }
       if (!takeLine(line)) return;
       treeLeft--;
+      treeLines.push_back(line);
       char t; char rel[200]; long size; char d[16], tm[16];
       for (auto &c : line) if (c == '\t') c = ' ';
       if (sscanf(line.c_str(), "%c %199s %ld %15s %15s", &t, rel, &size, d, tm) == 5) {
@@ -113,7 +116,9 @@ static void step() {
     }
     if (phase == 5) {                                  // answer to a probe: must be ERR
       if (!takeLine(line)) return;
-      probes++; if (line.compare(0, 4, "ERR ") == 0) probeErr++;
+      if (probeList[probes] == "CRC \\A.TXT") crcLine = line;          // an offered file: the answer is OK
+      else if (line.compare(0, 4, "ERR ") == 0) probeErr++;
+      probes++;
       nextRequest(); continue;
     }
     return;
@@ -190,7 +195,8 @@ int main() {
   // F5 = Send, everything selected
   probeList.clear();
   probeList.push_back("GET \\NOTOFFER.TXT 0 10");        // not offered
-  probeList.push_back("CRC \\A.TXT");                    // not served at all
+  probeList.push_back("CRC \\NOTOFFER.TXT");            // not offered
+  probeList.push_back("CRC \\A.TXT");                    // offered: CRC32 and size (the host checks resumed files)
   probeList.push_back("GET \\..\\..\\ETC\\PASSWD 0 10");  // path trick
   probeList.push_back("LIST \\");
   for (int i = 0; i < Right.count; i++) if (strcmp(Right.items[i].name, "..")) Right.items[i].sel = 1;
@@ -199,7 +205,17 @@ int main() {
   check("OFFER line: 5 files, 270011 bytes, destination \\ (inbox root), label DOS", lastOffer == "5 270011 \\ DOS");
   check("host got every file, byte for byte (incl. empty file and folder)", run("diff -r /tmp/fakeup /tmp/fakeinbox") == 0);
   check("host got END with 5 ok / 0 failed", endSent && g_ok == 5 && g_failed == 0);
-  check("all 4 probes (not offered / CRC / .. / LIST) were answered with ERR", probes == 4 && probeErr == 4);
+  check("probes: not offered / CRC / .. / LIST answered with ERR", probes == 5 && probeErr == 4);
+  {
+    int ok = 0;
+    for (auto &l : treeLines) {
+      int tabs = 0; for (char c : l) if (c == '\t') tabs++;
+      unsigned sec = 99, attr = 99; char name[40]; unsigned long size; char d[20], tm[20];
+      if (l[0] == 'F' && tabs == 6 && sscanf(l.c_str(), "F\t%39[^\t]\t%lu\t%19[^\t]\t%19[^\t]\t%u\t%u", name, &size, d, tm, &sec, &attr) == 6 && sec < 60 && attr <= 0x27) ok++;
+    }
+    check("TREE lines carry seconds and attributes (7 fields)", ok == 5);
+  }
+  check("CRC of an offered file: OK <size> <crc32>", crcLine == "OK 6 363A3020");
   check("transfer progress counted all bytes", ProgDone == 270011);
   check("session is in sync afterwards (HELLO works)", Connected == 1);
   FH_RAW = 0;

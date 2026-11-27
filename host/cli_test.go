@@ -100,7 +100,7 @@ func TestReceiveWaitKeepAlive(t *testing.T) {
 	if waits < 2 {
 		t.Errorf("the client should hear WAIT while the host waits for the answer, heard %d", waits)
 	}
-	if end := c.serve(files); !strings.HasPrefix(end, "END 1 0") {
+	if end := c.serve(files); !strings.HasPrefix(end, "END 1 0 0") {
 		t.Errorf("end: %s", end)
 	}
 }

@@ -2,7 +2,7 @@ package main
 
 // Receiving: the other direction.
 //
-// The DOS client offers files with "OFFER <files> <bytes> [label]". If the host
+// The DOS client offers files with "OFFER <files> <bytes> <path> [label]". If the host
 // agrees (receiving is on, the client is on the local network, the quota and
 // the free disk space allow it, and the person at the host said yes when the
 // host asks), the roles are swapped on the same TCP connection: the HOST
@@ -21,18 +21,19 @@ package main
 //
 // Protocol (see docs/PROTOCOL.md):
 //
-//	client: OFFER <files> <bytes> [label]
+//	client: OFFER <files> <bytes> <path> [label]
 //	host:   WAIT                 (now and then, while somebody is asked)
 //	host:   OK | ERR <code> <message>
 //	then, after OK, the host sends TREE \ and GET \path offset length and the
 //	client answers with the normal replies; at the end the host sends
-//	        END <files received> <files failed>     or    ABORT <message>
+//	        END <files received> <files failed> <files unchanged>     or    ABORT <message>
 //	and the connection is a normal one again.
 
 import (
 	"bufio"
 	"context"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"net"
@@ -52,6 +53,8 @@ const (
 	defaultReserve  = int64(1) << 30  // free space that must remain on the disk
 	maxOfferEntries = 100000
 	reportName      = "ECINBOX.LOG"
+	crcTimeout      = 30 * time.Minute // a slow DOS machine reading a big file for CRC32
+	attrMask        = 0x27             // DOS attributes that are kept: read-only, hidden, system, archive
 )
 
 // waitTick is how often a waiting client hears "WAIT" (a variable for the tests).
@@ -406,10 +409,12 @@ func cleanDOSComponent(s string) (string, bool) {
 }
 
 type offered struct {
-	isDir bool
-	parts []string // the checked, upper case components
-	size  int64
-	mod   time.Time // zero = unknown
+	isDir   bool
+	parts   []string // the checked, upper case components
+	size    int64
+	mod     time.Time // zero = unknown
+	attr    uint8     // DOS attributes (see attrMask)
+	hasAttr bool
 }
 
 func (o offered) rel() string { return strings.Join(o.parts, `\`) }
@@ -444,7 +449,19 @@ func parseOfferedLine(line string) (offered, error) {
 		mm, e5 := strconv.Atoi(f[4][2:])
 		if e1 == nil && e2 == nil && e3 == nil && e4 == nil && e5 == nil &&
 			y >= 1980 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31 && hh < 24 && mm < 60 {
-			o.mod = time.Date(y, time.Month(m), d, hh, mm, 0, 0, time.Local)
+			sec := 0
+			if len(f) > 5 {
+				if v, err := strconv.Atoi(f[5]); err == nil && v >= 0 && v < 60 {
+					sec = v
+				}
+			}
+			o.mod = time.Date(y, time.Month(m), d, hh, mm, sec, 0, time.Local)
+		}
+	}
+	if len(f) > 6 {
+		if v, err := strconv.Atoi(f[6]); err == nil && v >= 0 && v < 256 {
+			o.attr = uint8(v) & attrMask
+			o.hasAttr = true
 		}
 	}
 	return o, nil
@@ -464,7 +481,8 @@ type receiveSession struct {
 	r       *bufio.Reader
 	w       *bufio.Writer
 	rx      *Receiver
-	release func() // marks the receiver free (called once, before END)
+	release func()        // marks the receiver free (called once, before END)
+	timeout time.Duration // 0 = reverseTimeout
 }
 
 // ask sends one command to the client and returns the status line it answers
@@ -483,7 +501,11 @@ func (s *receiveSession) ask(cmd string) (string, error) {
 }
 
 func (s *receiveSession) readStatus() (string, error) {
-	s.conn.SetReadDeadline(time.Now().Add(reverseTimeout))
+	wait := reverseTimeout
+	if s.timeout > 0 {
+		wait = s.timeout
+	}
+	s.conn.SetReadDeadline(time.Now().Add(wait))
 	raw, err := s.r.ReadSlice('\n')
 	if err != nil {
 		return "", err
@@ -555,14 +577,23 @@ func (s *receiveSession) readItems(files int, total int64) ([]offered, error) {
 
 // receiveFile fetches one file with GET blocks. A returned clientError means
 // only this file failed.
-func (s *receiveSession) receiveFile(local string, o offered, received *int64, limit int64) error {
+func (s *receiveSession) receiveFile(local string, o offered, received *int64, limit int64) (resumedAt int64, err error) {
 	tmp := local + ".part"
+	var off int64
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if st, err := os.Lstat(tmp); err == nil && st.Mode().IsRegular() {
-		os.Remove(tmp) // left over from an earlier, interrupted transfer
+		if st.Size() > 0 && st.Size() < o.size {
+			// An interrupted transfer: go on where it stopped (checked with CRC32 at the end).
+			off = st.Size()
+			resumedAt = off
+			flags = os.O_WRONLY | os.O_APPEND
+		} else {
+			os.Remove(tmp)
+		}
 	}
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	f, err := os.OpenFile(tmp, flags, 0o644)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	closed := false
 	defer func() {
@@ -572,10 +603,9 @@ func (s *receiveSession) receiveFile(local string, o offered, received *int64, l
 	}()
 
 	buf := make([]byte, recvBlock)
-	var off int64
 	for off < o.size {
 		if s.rx.stopped() {
-			return fmt.Errorf("receiving was switched off")
+			return resumedAt, fmt.Errorf("receiving was switched off")
 		}
 		want := o.size - off
 		if want > recvBlock {
@@ -583,37 +613,80 @@ func (s *receiveSession) receiveFile(local string, o offered, received *int64, l
 		}
 		st, err := s.ask(fmt.Sprintf(`GET \%s %d %d`, o.rel(), off, want))
 		if err != nil {
-			return err
+			return resumedAt, err
 		}
 		var n, total int64
 		if _, err := fmt.Sscanf(st, "%d %d", &n, &total); err != nil || n < 1 || n > want {
-			return fmt.Errorf("bad answer to GET")
+			return resumedAt, fmt.Errorf("bad answer to GET")
 		}
 		if *received+n > limit {
-			return fmt.Errorf("the client sent more than it offered")
+			return resumedAt, fmt.Errorf("the client sent more than it offered")
 		}
 		s.conn.SetReadDeadline(time.Now().Add(reverseTimeout))
 		if _, err := io.ReadFull(s.r, buf[:n]); err != nil {
-			return err
+			return resumedAt, err
 		}
 		if _, err := f.Write(buf[:n]); err != nil {
-			return fileError{err}
+			return resumedAt, fileError{err}
 		}
 		off += n
 		*received += n
 	}
 	if err := f.Close(); err != nil {
 		closed = true
-		return fileError{err}
+		return resumedAt, fileError{err}
 	}
 	closed = true
+
+	if resumedAt > 0 {
+		// The first part was not seen in this transfer: the whole file must match.
+		s.timeout = crcTimeout
+		st, err := s.ask(fmt.Sprintf(`CRC \%s`, o.rel()))
+		s.timeout = 0
+		if ce, ok := err.(clientError); ok {
+			os.Remove(tmp)
+			return resumedAt, clientError{"cannot check the resumed file (" + ce.msg + "), the partial file was deleted"}
+		}
+		if err != nil {
+			return resumedAt, err
+		}
+		var size int64
+		var want uint32
+		if _, err := fmt.Sscanf(st, "%d %x", &size, &want); err != nil {
+			return resumedAt, fmt.Errorf("bad answer to CRC")
+		}
+		got, n, cerr := fileCRC(tmp)
+		if cerr != nil {
+			return resumedAt, fileError{cerr}
+		}
+		if got != want || n != size || n != o.size {
+			os.Remove(tmp)
+			return resumedAt, clientError{"the resumed file does not match (CRC32), the partial file was deleted, send it again"}
+		}
+	}
+
 	if err := os.Rename(tmp, local); err != nil {
-		return fileError{err}
+		return resumedAt, fileError{err}
 	}
 	if !o.mod.IsZero() {
 		os.Chtimes(local, o.mod, o.mod)
 	}
-	return nil
+	if o.hasAttr {
+		setAttrs(local, o.attr)
+	}
+	return resumedAt, nil
+}
+
+// fileCRC is the CRC32 and the size of a file.
+func fileCRC(path string) (uint32, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer f.Close()
+	h := crc32.NewIEEE()
+	n, err := io.Copy(h, f)
+	return h.Sum32(), n, err
 }
 
 // fileError is a problem with the host's own disk: the transfer stops.
@@ -807,7 +880,7 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 	}
 
 	var report []string
-	ok, failed := 0, 0
+	ok, failed, unchanged := 0, 0, 0
 	var received int64
 	for _, o := range items {
 		if s.rx.stopped() {
@@ -816,12 +889,21 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 		}
 		local := filepath.Join(append([]string{sdir}, o.parts...)...)
 		if o.isDir {
-			if err := os.Mkdir(local, 0o755); err != nil && !os.IsExist(err) {
+			err := os.Mkdir(local, 0o755)
+			if err != nil && !os.IsExist(err) {
 				return abort("cannot create folder %s: %v", o.rel(), err)
+			}
+			if err == nil && o.hasAttr {
+				setAttrs(local, o.attr)
 			}
 			continue
 		}
-		if _, err := os.Lstat(local); err == nil {
+		if st, err := os.Lstat(local); err == nil {
+			// The same file as before (size and time): nothing to do.
+			if st.Mode().IsRegular() && st.Size() == o.size && !o.mod.IsZero() && sameTime(st.ModTime(), o.mod) {
+				unchanged++
+				continue
+			}
 			// Only new files are written into a folder that exists already.
 			failed++
 			logf("%s: %s skipped: already exists", remote, o.rel())
@@ -838,9 +920,16 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 				if !o.mod.IsZero() {
 					os.Chtimes(local, o.mod, o.mod)
 				}
+				if o.hasAttr {
+					setAttrs(local, o.attr)
+				}
 			}
 		} else {
-			ferr = s.receiveFile(local, o, &received, total)
+			var from int64
+			from, ferr = s.receiveFile(local, o, &received, total)
+			if from > 0 && ferr == nil {
+				report = append(report, fmt.Sprintf("RESUMED %s at %d bytes (CRC32 checked)", o.rel(), from))
+			}
 		}
 		switch e := ferr.(type) {
 		case nil:
@@ -862,11 +951,23 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 
 	// The report is written and the receiver is free again before the client hears END.
 	logf("%s: received %d files (%d bytes), %d failed, in %s", remote, ok, received, failed, time.Since(started).Round(time.Second))
+	if unchanged > 0 {
+		report = append(report, fmt.Sprintf("Unchanged (same size and time, not sent again): %d", unchanged))
+	}
 	writeReport(sdir, remote, label, started, ok, failed, received, report)
 	s.release()
 	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	fmt.Fprintf(s.w, "END %d %d\r\n", ok, failed)
+	fmt.Fprintf(s.w, "END %d %d %d\r\n", ok, failed, unchanged)
 	return s.w.Flush() == nil
+}
+
+// sameTime compares with the 2 second resolution of a DOS file system.
+func sameTime(a, b time.Time) bool {
+	d := a.Sub(b)
+	if d < 0 {
+		d = -d
+	}
+	return d <= 2*time.Second
 }
 
 func isConnErr(err error) bool {

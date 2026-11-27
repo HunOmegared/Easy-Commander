@@ -81,8 +81,16 @@ only for what it offered, and the offered files are the root (`\`):
     client:  OK <entries> <total size>, then the entries (as for TREE)
     host:    GET \<path> <offset> <length>        (blocks of 16 KB)
     client:  OK <n> <filesize>, then n bytes       or   ERR <code> <message>
+    host:    CRC \<path>                           (only to check a resumed file)
+    client:  OK <size> <CRC32 as 8 hex digits>     or   ERR <code> <message>
     ...
-    host:    END <files received> <files failed>        or   ABORT <message>
+    host:    END <received> <failed> <unchanged>        or   ABORT <message>
+
+The client's list may carry two more fields on every line, after `HHMM`:
+`TAB <seconds> TAB <attributes>` (seconds 0-59; attributes = the DOS attribute
+byte: read-only 1, hidden 2, system 4, archive 32, other bits are ignored). The host
+sets the time with the seconds and, on Windows, the attributes (elsewhere only
+read-only). Lines without the two fields are fine.
 
 `END` or `ABORT` is the last line of the host: the connection is a normal one
 again and the client may send the next command. A client answers `ERR` to a
@@ -99,6 +107,15 @@ Everything is decided on the host, and nothing the client says is trusted:
 * Every name must be a plain 8.3 name: no `..`, no separators, no device names
   (`CON`, `NUL`, `COM1` ...). A folder must be listed before its contents. A
   list that breaks a rule ends the transfer with `ABORT`.
+* A file that exists already with the same size and time (2 seconds apart at most)
+  is not fetched again: it is counted as *unchanged*. A different one is never
+  overwritten (see above).
+* An interrupted file (`NAME.EXT.part`, smaller than the offered size) is
+  continued where it stopped: the host asks for the rest with `GET`, then asks
+  `CRC` for the whole file and compares it with its own file. If they differ, or
+  the client cannot answer, the partial file is deleted and the file counts as
+  failed (the next try starts from the beginning). A file that was fetched in one
+  go is not checked again.
 * A file is written as `NAME.EXT.part` and renamed when it is complete; the date
   and time from the list are set on it. A report `ECINBOX.LOG` is added to the
   folder (the reports of several transfers follow each other).

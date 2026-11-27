@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"net"
 	"os"
@@ -24,6 +25,10 @@ type fakeFile struct {
 	data   []byte
 	mod    time.Time
 	failAt int64 // read error from this offset on (-1 = never)
+
+	extra  bool // the list line carries seconds and attributes
+	attr   int
+	badCRC bool // CRC answers a wrong value
 }
 
 func ff(rel string, data string) fakeFile {
@@ -35,9 +40,11 @@ func fd(rel string) fakeFile {
 }
 
 type fakeClient struct {
-	t    *testing.T
-	conn net.Conn
-	r    *bufio.Reader
+	crcAsked []string
+	gets     []string
+	t        *testing.T
+	conn     net.Conn
+	r        *bufio.Reader
 }
 
 func dial(t *testing.T, port int) *fakeClient {
@@ -111,12 +118,35 @@ func (c *fakeClient) serve(files []fakeFile) string {
 				if f.dir {
 					kind, size = "D", 0
 				}
-				fmt.Fprintf(c.conn, "%s\t%s\t%d\t%s\t%s\r\n", kind, f.rel, size, f.mod.Format("20060102"), f.mod.Format("1504"))
+				ex := ""
+				if f.extra {
+					ex = fmt.Sprintf("\t%d\t%d", f.mod.Second(), f.attr)
+				}
+				fmt.Fprintf(c.conn, "%s\t%s\t%d\t%s\t%s%s\r\n", kind, f.rel, size, f.mod.Format("20060102"), f.mod.Format("1504"), ex)
 			}
+		case strings.HasPrefix(l, "CRC "):
+			p := strings.Fields(l)
+			var f *fakeFile
+			for i := range files {
+				if `\`+files[i].rel == p[1] {
+					f = &files[i]
+				}
+			}
+			if f == nil {
+				fmt.Fprintf(c.conn, "ERR 404 Not found\r\n")
+				continue
+			}
+			sum := crc32.ChecksumIEEE(f.data)
+			if f.badCRC {
+				sum ^= 1
+			}
+			c.crcAsked = append(c.crcAsked, p[1])
+			fmt.Fprintf(c.conn, "OK %d %08X\r\n", len(f.data), sum)
 		case strings.HasPrefix(l, "GET "):
 			p := strings.Fields(l)
 			off, _ := strconv.ParseInt(p[2], 10, 64)
 			ln, _ := strconv.ParseInt(p[3], 10, 64)
+			c.gets = append(c.gets, l)
 			var f *fakeFile
 			for i := range files {
 				if `\`+files[i].rel == p[1] {
@@ -194,7 +224,7 @@ func TestReceiveBasic(t *testing.T) {
 	if st := c.offer(files, "486_C"); st != "OK" {
 		t.Fatalf("offer: %s", st)
 	}
-	if end := c.serve(files); end != "END 4 0" {
+	if end := c.serve(files); end != "END 4 0 0" {
 		t.Fatalf("end: %s", end)
 	}
 
@@ -255,7 +285,7 @@ func TestReceiveClientErrorFailsOnlyThatFile(t *testing.T) {
 	h, port := startRx(t, InboxConfig{}, nil)
 	c := dial(t, port)
 	c.offer(files, "OLD")
-	if end := c.serve(files); end != "END 2 1" {
+	if end := c.serve(files); end != "END 2 1 0" {
 		t.Fatalf("end: %s", end)
 	}
 	sess := onlyChild(t, h.rx.cfg.Dir)
@@ -642,7 +672,7 @@ func TestInboxBrowse(t *testing.T) {
 	if st := c.offer(files, "BOX"); st != "OK" {
 		t.Fatalf("offer: %s", st)
 	}
-	if end := c.serve(files); end != "END 2 0" {
+	if end := c.serve(files); end != "END 2 0 0" {
 		t.Fatalf("end: %s", end)
 	}
 	c.send("ILIST \\")
@@ -720,7 +750,7 @@ func TestMkdirAndOfferIntoFolder(t *testing.T) {
 	if st := c.status(); st != "OK" {
 		t.Fatalf("offer: %s", st)
 	}
-	if end := c.serve(files); end != "END 2 0" {
+	if end := c.serve(files); end != "END 2 0 0" {
 		t.Fatalf("end: %s", end)
 	}
 	dir := filepath.Join(h.rx.cfg.Dir, "BACKUP", "OLD486")
@@ -737,7 +767,7 @@ func TestMkdirAndOfferIntoFolder(t *testing.T) {
 	if st := c.status(); st != "OK" {
 		t.Fatalf("offer 2: %s", st)
 	}
-	if end := c.serve(files); end != "END 0 2" {
+	if end := c.serve(files); end != "END 0 1 1" {
 		t.Fatalf("end 2: %s", end)
 	}
 	if readFile(t, filepath.Join(dir, "A.TXT")) != "MINE" {
@@ -765,5 +795,128 @@ func TestMkdirAndOfferIntoFolder(t *testing.T) {
 	}
 	if !strings.HasPrefix(last, "ERR 403") {
 		t.Errorf("no limit: %s", last)
+	}
+}
+
+func TestParseOfferedSecondsAndAttrs(t *testing.T) {
+	o, err := parseOfferedLine("F\tA.TXT\t5\t20201231\t2359\t58\t39")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.mod.Second() != 58 || !o.hasAttr || o.attr != 0x27 {
+		t.Errorf("seconds %d attr %#x has %v", o.mod.Second(), o.attr, o.hasAttr)
+	}
+	o, _ = parseOfferedLine("F\tA.TXT\t5\t20201231\t2359\t99\t255")
+	if o.mod.Second() != 0 || o.attr != attrMask {
+		t.Errorf("bad seconds are ignored, attributes are masked: %d %#x", o.mod.Second(), o.attr)
+	}
+	o, _ = parseOfferedLine("F\tA.TXT\t5\t20201231\t2359")
+	if o.hasAttr || o.mod.Second() != 0 {
+		t.Error("old style line")
+	}
+}
+
+func TestUnchangedFilesAreSkipped(t *testing.T) {
+	h, port := startRx(t, InboxConfig{Reserve: 0}, nil)
+	c := dial(t, port)
+	c.send("IMKDIR \\BK")
+	c.line()
+	mod := time.Date(2021, 5, 6, 7, 8, 30, 0, time.Local)
+	same := ff("SAME.TXT", "same")
+	same.mod, same.extra = mod, true
+	chg := ff("CHG.TXT", "changed")
+	chg.mod, chg.extra = mod, true
+	files := []fakeFile{same, chg}
+	send := func() string {
+		n, total := counts(files)
+		c.send(fmt.Sprintf(`OFFER %d %d \BK`, n, total))
+		if st := c.status(); st != "OK" {
+			t.Fatalf("offer: %s", st)
+		}
+		return c.serve(files)
+	}
+	if end := send(); end != "END 2 0 0" {
+		t.Fatalf("first: %s", end)
+	}
+	st, _ := os.Stat(filepath.Join(h.rx.cfg.Dir, "BK", "SAME.TXT"))
+	if st.ModTime().Second() != 30 {
+		t.Errorf("seconds not kept: %v", st.ModTime())
+	}
+	files[1].mod = mod.Add(time.Minute)
+	c.gets = nil
+	if end := send(); end != "END 0 1 1" {
+		t.Fatalf("second: %s", end)
+	}
+	if len(c.gets) != 0 {
+		t.Errorf("nothing should have been fetched again: %v", c.gets)
+	}
+	if rep := readFile(t, filepath.Join(h.rx.cfg.Dir, "BK", reportName)); !strings.Contains(rep, "Unchanged (same size and time, not sent again): 1") || !strings.Contains(rep, "SKIPPED CHG.TXT: already exists") {
+		t.Errorf("report: %q", rep)
+	}
+}
+
+func TestResumeChecksTheWholeFile(t *testing.T) {
+	data := strings.Repeat("0123456789abcdef", 6000) // 96000 bytes
+	h, port := startRx(t, InboxConfig{Reserve: 0}, nil)
+	c := dial(t, port)
+	c.send("IMKDIR \\BK")
+	c.line()
+	dir := filepath.Join(h.rx.cfg.Dir, "BK")
+	f := ff("BIG.BIN", data)
+	files := []fakeFile{f}
+	send := func() string {
+		n, total := counts(files)
+		c.send(fmt.Sprintf(`OFFER %d %d \BK`, n, total))
+		if st := c.status(); st != "OK" {
+			t.Fatalf("offer: %s", st)
+		}
+		return c.serve(files)
+	}
+
+	// 1. an interrupted transfer is continued, and the whole file is checked
+	os.WriteFile(filepath.Join(dir, "BIG.BIN.part"), []byte(data[:40000]), 0o644)
+	if end := send(); end != "END 1 0 0" {
+		t.Fatalf("resume: %s", end)
+	}
+	if readFile(t, filepath.Join(dir, "BIG.BIN")) != data {
+		t.Error("resumed file differs")
+	}
+	if len(c.gets) == 0 || !strings.HasPrefix(c.gets[0], `GET \BIG.BIN 40000 `) {
+		t.Errorf("first GET: %v", c.gets)
+	}
+	if len(c.crcAsked) != 1 {
+		t.Errorf("CRC asked %d times", len(c.crcAsked))
+	}
+	if !strings.Contains(readFile(t, filepath.Join(dir, reportName)), "RESUMED BIG.BIN at 40000 bytes") {
+		t.Error("report")
+	}
+
+	// 2. the beginning was different (the file changed in between): the result is refused
+	os.Remove(filepath.Join(dir, "BIG.BIN"))
+	os.WriteFile(filepath.Join(dir, "BIG.BIN.part"), []byte(strings.Repeat("X", 40000)), 0o644)
+	if end := send(); end != "END 0 1 0" {
+		t.Fatalf("mismatch: %s", end)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "BIG.BIN")); err == nil {
+		t.Error("a file that does not match was kept")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "BIG.BIN.part")); err == nil {
+		t.Error("the bad partial file was not deleted")
+	}
+	// ... and the next try starts from the beginning and works
+	c.gets = nil
+	if end := send(); end != "END 1 0 0" {
+		t.Fatalf("again: %s", end)
+	}
+	if !strings.HasPrefix(c.gets[0], `GET \BIG.BIN 0 `) || readFile(t, filepath.Join(dir, "BIG.BIN")) != data {
+		t.Errorf("fresh start: %v", c.gets[:1])
+	}
+
+	// 3. a client that cannot answer CRC: the partial file is deleted, not trusted
+	os.Remove(filepath.Join(dir, "BIG.BIN"))
+	os.WriteFile(filepath.Join(dir, "BIG.BIN.part"), []byte(data[:1000]), 0o644)
+	files[0].badCRC = true
+	if end := send(); end != "END 0 1 0" {
+		t.Fatalf("bad crc: %s", end)
 	}
 }
