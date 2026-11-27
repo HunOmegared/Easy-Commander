@@ -317,7 +317,7 @@ func (s *server) cmdMkdir(w *bufio.Writer, arg string) {
 	}
 	for _, e := range es {
 		if e.DOS == name || strings.EqualFold(e.Real, name) {
-			writeErr(w, protoErr{409, "Exists already"})
+			writeErr(w, protoErr{409, "Already exists"})
 			return
 		}
 	}
@@ -824,8 +824,8 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 		if _, err := os.Lstat(local); err == nil {
 			// Only new files are written into a folder that exists already.
 			failed++
-			logf("%s: %s skipped: it exists already", remote, o.rel())
-			report = append(report, fmt.Sprintf("SKIPPED %s: it exists already", o.rel()))
+			logf("%s: %s skipped: already exists", remote, o.rel())
+			report = append(report, fmt.Sprintf("SKIPPED %s: already exists", o.rel()))
 			continue
 		}
 		var ferr error

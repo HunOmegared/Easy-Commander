@@ -94,7 +94,7 @@ Everything is decided on the host, and nothing the client says is trusted:
 
 * The files go into the folder named by `<path>` below the inbox folder, or, in the
   root, into a new folder `<label>_<YYYYMMDD>_<HHMM>` (never into the shared
-  folder). A file that exists already is never overwritten: it is skipped, counts
+  folder). A file that already exists is never overwritten: it is skipped, counts
   as failed and is named in the report.
 * Every name must be a plain 8.3 name: no `..`, no separators, no device names
   (`CON`, `NUL`, `COM1` ...). A folder must be listed before its contents. A
@@ -135,7 +135,7 @@ seen, and fetched again.
 
 Makes a folder in the inbox: the last component of `<path>` is the new name (a plain
 8.3 name, no device names), the folder above it must exist. `OK`, or `ERR 400` (bad
-name or path), `404` (no such parent), `405`, `409` (exists already), `403` (receiving
+name or path), `404` (no such parent), `405`, `409` (already exists), `403` (receiving
 is off, the client may not, or more than 100 folders in one connection).
 
 ### `QUIT`
