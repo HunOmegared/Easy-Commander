@@ -5028,9 +5028,9 @@ static void endProgram( int rc ) {
 int main( int argc, char *argv[] ) {
 
 #ifdef EC_UPLOAD
-  printf( "Easy Commander 1.0 (upload edition), Copyright (C) 2026 Daniel Szentmiklosi.\n" );
+  printf( "Easy Commander 1.1 (upload edition), Copyright (C) 2026 Daniel Szentmiklosi.\n" );
 #else
-  printf( "Easy Commander 1.0, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
+  printf( "Easy Commander 1.1, Copyright (C) 2026 Daniel Szentmiklosi.\n" );
 #endif
   printf( "Free software, GPLv3 or later. Built " __DATE__ ".\n\n" );
 

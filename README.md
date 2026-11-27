@@ -18,7 +18,7 @@ how to use.
 
 ## Status
 
-Version 1.0. Tested in an emulated PC (86Box, MS-DOS 6.22, NE2000
+Version 1.1. Tested in an emulated PC (86Box, MS-DOS 6.22, NE2000
 compatible network card) and on two real machines, both with a CompactFlash card
 instead of a hard disk and an RTL8019AS ISA network card with the Realtek packet
 driver: an AMD 5x86-133 with 8 MB RAM, and a Cyrix 486DLC with 4 MB RAM (with an
