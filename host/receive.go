@@ -465,6 +465,7 @@ type receiveSession struct {
 	rx      *Receiver
 	release func()        // marks the receiver free (called once, before END)
 	timeout time.Duration // 0 = reverseTimeout
+	slowest time.Duration // longest finishing of a file (close, rename, date, attributes)
 }
 
 // ask sends one command to the client and returns the status line it answers
@@ -614,6 +615,7 @@ func (s *receiveSession) receiveFile(local string, o offered, received *int64, l
 		off += n
 		*received += n
 	}
+	finStart := time.Now()
 	if err := f.Close(); err != nil {
 		closed = true
 		return resumedAt, fileError{err}
@@ -655,6 +657,9 @@ func (s *receiveSession) receiveFile(local string, o offered, received *int64, l
 	}
 	if o.hasAttr {
 		setAttrs(local, o.attr)
+	}
+	if d := time.Since(finStart); d > s.slowest { // close .. attributes
+		s.slowest = d
 	}
 	return resumedAt, nil
 }
@@ -930,7 +935,14 @@ func (s *receiveSession) run(sdir, remote, label string, files int, total int64)
 	if unchanged > 0 {
 		report = append(report, fmt.Sprintf("Unchanged (same size and time, not sent again): %d", unchanged))
 	}
+	if s.slowest >= time.Second {
+		report = append(report, fmt.Sprintf("Note: finishing one file on this computer took %s (an antivirus scanning new files?)", s.slowest.Round(100*time.Millisecond)))
+	}
+	repStart := time.Now()
 	writeReport(sdir, remote, label, started, ok, failed, received, report)
+	if d := time.Since(repStart); d >= time.Second {
+		logf("%s: writing the report took %s (an antivirus scanning it?)", remote, d.Round(100*time.Millisecond))
+	}
 	s.release()
 	s.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	fmt.Fprintf(s.w, "END %d %d %d\r\n", ok, failed, unchanged)
