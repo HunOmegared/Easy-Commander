@@ -1015,11 +1015,11 @@ static void drawPanel( Panel *p, int x0, int active ) {
   // Which side this is.
 #ifdef EC_UPLOAD
   if ( p->remote && UploadMode ) {
-    if ( Active == 0 ) sprintf( buf, " INBOX of %.14s - F5 = Get << ", HostName );
+    if ( Active == 0 ) sprintf( buf, " INBOX of %.14s - F5 = Get >> ", HostName );
     else               sprintf( buf, " INBOX of %.24s ", HostName );
   }
   else if ( !p->remote && UploadMode ) {
-    if ( Active == 1 ) strcpy( buf, " Local - F5 = Send >> " );
+    if ( Active == 1 ) strcpy( buf, " Local - F5 = Send << " );
     else               strcpy( buf, " Local " );
   }
   else
@@ -4781,7 +4781,7 @@ static void cmdHelp( void ) {
 
 #ifdef EC_UPLOAD
   lines[12] = "F4 / F6     upload mode (left = host inbox) / send a whole disk as .IMG";
-  lines[13] = "F5          in upload mode: sends right >>, or gets <<";
+  lines[13] = "F5          in upload mode: sends right to left <<, or gets >>";
   lines[14] = "Ctrl+O      look at the DOS screen (any key returns)";
   lines[15] = memLine;
   uiDialog( "Easy Commander - help", lines, 16, 0 );
