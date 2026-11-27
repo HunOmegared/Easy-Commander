@@ -1,9 +1,11 @@
 # Easy Commander
 
-A Norton Commander style file manager for **MS-DOS** that fetches files over the
-network from a modern PC. A small **host program** (Windows / Linux) shares a
-folder read-only; the **DOS client** shows the host on the left and a local DOS
-folder on the right, and downloads files and whole folders with F5.
+A Norton Commander style file manager for **MS-DOS** that moves files over the
+network to and from a modern PC. A small **host program** (Windows / Linux) shares
+a folder read-only and, if you switch it on, receives backups into an inbox folder;
+the **DOS client** shows the host on the left and a local DOS folder on the right.
+F5 downloads files and whole folders, and the upload edition (`ECU.EXE`) sends files,
+folders and whole disks (as `.IMG` images) to the host.
 
 It exists because getting files onto a retro PC over Ethernet usually means
 setting up FTP, SMB1 or serial transfers, which are all awkward. Here the host
@@ -36,9 +38,11 @@ host search and switching between two hosts worked on all of them.
   the current date).
 * Select and unselect files by a mask (`+` and `-`, for example `*.TXT`).
 * Cancel a download with Esc; existing files are never overwritten without asking.
-* **Download only, by design:** the host shares a folder read-only and the client
-  has no upload. Nothing on the host can be changed, renamed or deleted from the
-  DOS side, and the host only accepts connections from local network addresses.
+* **Read-only by default:** the host shares a folder read-only. Nothing on the host
+  can be changed, renamed or deleted from the DOS side, and the host only accepts
+  connections from local network addresses. Receiving files is a separate switch
+  (see [Upload and disk images](#upload-and-disk-images)); a build without any
+  receiving code exists for those who want a guarantee.
 * Delete files and folders on the *local* side (F8).
 * Switch drives (Alt+F2) and host (Alt+F1).
 * Remembers the last host and the CRC option in `EC.INI` next to `EC.EXE`; started
@@ -129,6 +133,36 @@ If something does not work:
 * *Slow:* see [Performance](#performance); on old machines the disk, not the
   network, is the limit.
 
+## Upload and disk images
+
+`EC.EXE` only downloads. **`ECU.EXE`** (the same source built with `-dEC_UPLOAD`, see
+[BUILDING](docs/BUILDING.md)) can also send things to the host, for backups of old PCs:
+
+* On the host, press **Start receiving** (Linux/console: `-inbox DIR`) and choose the
+  **inbox folder**, an optional quota and whether you are asked before every transfer.
+  The inbox is separate from the shared folder.
+* In `ECU.EXE` press **F4**: the left panel now shows the host's **inbox** (browse it like
+  the share; **F7** makes a folder there). **F5** sends the selected items of the right
+  panel to the folder shown on the left (`Send <<`), or, with the left panel active,
+  gets files from the inbox (`Get >>`). The files go straight into that folder, like
+  copying in any file manager.
+* **F6** sends a whole **floppy or hard disk** as an image file (`FLOPPYA.IMG`, `DISK80.IMG` ...)
+  through BIOS INT 13h, with LBA where the BIOS has it. Unreadable sectors are
+  retried and then sent as zeros (the summary says how many). Disks above 4 GB are not
+  supported yet. A WinImage or `mount -o loop` of the result shows the partition.
+* An interrupted transfer (Esc, cable, power) is **resumed**: the host keeps a `.part`
+  file, continues from there and checks the whole file with CRC32 at the end. Files
+  that are already there with the same size and time are skipped (**Unchanged**).
+  Dates (with seconds) and attributes (read-only, hidden, system, archive) are kept in
+  both directions.
+
+What the host does about safety: it **never overwrites** a file (a different file with the
+same name is reported as "already exists"), accepts only plain 8.3 names (no `..`,
+no device names such as `CON`), refuses senders outside the local networks, honours the
+quota and keeps free disk space, takes one transfer at a time, and writes a report
+(`ECINBOX.LOG`) into the folder it received into. Received files are never run.
+The read-only host build (`go build -tags readonly`) leaves all of this out of the program.
+
 ## Keys
 
 | Key | Action |
@@ -140,10 +174,12 @@ If something does not work:
 | `+` `-` | select / unselect files by a mask such as `*.TXT` or `READ*` (Enter alone = `*.*`, all) |
 | `*` | invert the selection |
 | F3 | view the file under the cursor (in the viewer: F4 hex/text, F7 search, Left/Right sideways, Esc or F10 close) |
-| F5 | download the selected items (or the one under the cursor) to the right panel's folder |
-| F7 | make a folder (right panel) |
+| F5 | download the selected items (or the one under the cursor) to the right panel's folder; in upload mode with the right panel active: send them to the inbox |
+| F7 | make a folder (right panel; in upload mode in the inbox when the left panel is active) |
 | F8 | delete (right panel only; only `Y` confirms) |
 | F9 | options (CRC32 check of every download, fast CRC32 code) |
+| F4 | ECU.EXE: switch between the shared folder and the host's inbox (upload mode) |
+| F6 | ECU.EXE, upload mode: send a whole disk as an `.IMG` file |
 | F2 | reconnect and refresh the host panel |
 | Alt+F1 | connect to another host |
 | Alt+F2 | change drive (right panel) |
