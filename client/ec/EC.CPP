@@ -3604,7 +3604,7 @@ static void cmdUploadMode( void ) {
 
   if ( !UploadCap ) {
     uiMessage( "Upload", "This host does not receive files (right now).",
-               "Switch on \"Start receiving\" in the host window." );
+               "Is receiving switched on at the host?" );
     return;
   }
 
