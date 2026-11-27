@@ -51,3 +51,8 @@ static inline void _dos_setdrive(unsigned d, unsigned *total){ if(d==1||d==3||d=
 static std::vector<std::pair<unsigned,unsigned> > g_ftimes;
 static inline unsigned _dos_setftime(int, unsigned d, unsigned t){ g_ftimes.push_back(std::make_pair(d,t)); return 0; }
 static inline void _harderr(int (*)(unsigned,unsigned,unsigned*)){}
+struct dosdate_t { unsigned char day, month; unsigned short year; unsigned char dayofweek; };
+struct dostime_t { unsigned char hour, minute, second, hsecond; };
+static inline void _dos_getdate(struct dosdate_t *d){ d->day=27; d->month=11; d->year=2026; d->dayofweek=5; }
+static inline void _dos_gettime(struct dostime_t *t){ t->hour=10; t->minute=20; t->second=30; t->hsecond=0; }
+#define _fmemcpy memcpy

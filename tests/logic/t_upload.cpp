@@ -14,6 +14,12 @@
 #undef mkdir
 #undef rmdir
 
+// no disks in this test (t_image.cpp has a fake one)
+static int bios13ReadChs(u8, u16, u8, u8, u8, void *) { return 1; }
+static int bios13ReadLba(u8, u32, u16, void *) { return 1; }
+static void bios13Reset(u8) {}
+static int bios13Params(DiskInfo *) { return 1; }
+
 static u16 fakeVid[80*25];
 static int failures = 0;
 static void check(const char *what, int ok) { printf("%-64s %s\n", what, ok ? "ok" : "*** FAILED ***"); if (!ok) failures++; }

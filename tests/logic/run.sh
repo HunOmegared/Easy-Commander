@@ -32,8 +32,11 @@ HEAD
 
 status=0
 echo "=== t_upload (EC_UPLOAD) ==="
-g++ -std=gnu++11 -w -DEC_UPLOAD -I"$HERE/stubs" -I"$B" -o "$B/t_upload" "$HERE/t_upload.cpp"
+g++ -std=gnu++11 -w -DEC_UPLOAD -DEC_FAKE_DISK -I"$HERE/stubs" -I"$B" -o "$B/t_upload" "$HERE/t_upload.cpp"
 timeout 60 "$B/t_upload" || status=1
+echo "=== t_image (EC_UPLOAD + fake disk) ==="
+g++ -std=gnu++11 -w -DEC_UPLOAD -DEC_FAKE_DISK -I"$HERE/stubs" -I"$B" -o "$B/t_image" "$HERE/t_image.cpp"
+timeout 60 "$B/t_image" || status=1
 for t in t_download t_local t_discovery t_crc t_view t_mask; do
   echo "=== $t ==="
   g++ -std=gnu++11 -w -I"$HERE/stubs" -I"$B" -o "$B/$t" "$HERE/$t.cpp"

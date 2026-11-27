@@ -90,6 +90,12 @@ the object files first, so the two programs do not mix):
 
 The result is `ECU.EXE`. `EC.EXE` stays download-only.
 
+In ECU.EXE, **F6** sends a whole disk (floppy or hard disk, read through BIOS
+INT 13h, with LBA extensions when the BIOS has them) as an `.IMG` file. On the
+wire it is an ordinary offered file, so the host needs nothing new: resume,
+CRC32 check and "already exists" work as for any file. Unreadable sectors are
+retried three times and then sent as zeros. Disks above 4 GB are refused for now.
+
 The command line test client is built the same way from `client/ectest/`
 (folder `ECTEST`, `ECTEST.CFG` copied from `NC.CFG`); it fits in the compact
 model.

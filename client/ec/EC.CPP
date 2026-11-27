@@ -105,6 +105,7 @@ typedef unsigned long  u32;
 #define K_F3    0x13D
 #define K_F4    0x13E
 #define K_F5    0x13F
+#define K_F6    0x140
 #define K_F7    0x141
 #define K_F8    0x142
 #define K_F9    0x143
@@ -1022,6 +1023,7 @@ static void drawKeyBar( void ) {
 #ifdef EC_UPLOAD
   normal[3] = UploadMode ? "Share" : "Upload";
   normal[4] = (UploadMode && (Active == 1)) ? "Send" : "Get";
+  normal[5] = UploadMode ? "Image" : "";
 #endif
 
   static const char *withAlt[10] = {
@@ -2744,6 +2746,377 @@ static void dropConnection( void ) {
 }
 
 
+// ---- reading a whole disk (BIOS INT 13h): the "file" DISK80.IMG ----
+//
+// The disk is offered like one big file; the host's GET blocks are answered by
+// reading sectors.  Unreadable sectors (after 3 tries each) are sent as zeros
+// and counted, so that one bad sector does not lose the whole image.  Disks
+// larger than 4 GB are not supported yet (sizes are 32 bit here).
+
+#define IMG_WIN_SECT   32                 // sectors per BIOS call: 16 KB
+#define IMG_MAX_DISKS  10
+
+typedef struct {
+  u8       drive;                         // BIOS number: 0, 1 = floppy, 80h... = hard disk
+  u8       ext;                           // INT 13h extensions (LBA) can be used
+  u8       big;                           // more than 4 GB
+  u16      cyls;
+  u8       heads;
+  u8       spt;
+  u32      sectors;
+  char     text[48];
+} DiskInfo;
+
+static DiskInfo      Disks[IMG_MAX_DISKS];
+static int           DiskCount;
+static DiskInfo     *ImgDisk;             // the disk being sent (NULL: no image)
+static char          ImgName[16];         // "DISK80.IMG"
+static u32           ImgBytes;
+static void __far   *ImgWin;              // 16 KB that do not cross a 64 KB border (DMA)
+static unsigned      ImgSeg;              // the DOS block behind it
+static char         *ImgTmp;              // 16 KB to cut the blocks to the host's offsets
+static unsigned long ImgBad;              // unreadable sectors
+static unsigned long ImgBadFirst[8];      // the first few
+
+#ifdef EC_FAKE_DISK
+// The tests provide these.
+static int bios13ReadChs( u8 drive, u16 cyl, u8 head, u8 sect, u8 count, void __far *buf );
+static int bios13ReadLba( u8 drive, u32 lba, u16 count, void __far *buf );
+static void bios13Reset( u8 drive );
+static int bios13Params( DiskInfo *d );   // fills cyls/heads/spt/sectors/ext/big; 0 = there is a disk
+#else
+
+#pragma pack(1)
+typedef struct { u8 size; u8 zero; u16 count; u16 off; u16 seg; u32 lbaLo; u32 lbaHi; } Dap;
+typedef struct { u16 size; u16 flags; u32 cyl; u32 heads; u32 spt; u32 totLo; u32 totHi; u16 bps; } ExtParams;
+#pragma pack()
+
+static int bios13ReadChs( u8 drive, u16 cyl, u8 head, u8 sect, u8 count, void __far *buf ) {
+
+  union REGS r;
+  struct SREGS sr;
+
+  segread( &sr );
+  r.h.ah = 0x02;
+  r.h.al = count;
+  r.h.ch = (u8)cyl;
+  r.h.cl = (u8)(sect | ((cyl >> 2) & 0xC0));
+  r.h.dh = head;
+  r.h.dl = drive;
+  sr.es  = FP_SEG( buf );
+  r.x.bx = FP_OFF( buf );
+  int86x( 0x13, &r, &r, &sr );
+
+  return r.x.cflag ? (r.h.ah ? r.h.ah : 0xFF) : 0;
+}
+
+static int bios13ReadLba( u8 drive, u32 lba, u16 count, void __far *buf ) {
+
+  union REGS r;
+  struct SREGS sr;
+  Dap dap;
+
+  dap.size  = 16;
+  dap.zero  = 0;
+  dap.count = count;
+  dap.off   = FP_OFF( buf );
+  dap.seg   = FP_SEG( buf );
+  dap.lbaLo = lba;
+  dap.lbaHi = 0;
+
+  segread( &sr );
+  r.h.ah = 0x42;
+  r.h.dl = drive;
+  r.x.si = FP_OFF( &dap );
+  sr.ds  = FP_SEG( &dap );
+  int86x( 0x13, &r, &r, &sr );
+
+  return r.x.cflag ? (r.h.ah ? r.h.ah : 0xFF) : 0;
+}
+
+static void bios13Reset( u8 drive ) {
+
+  union REGS r;
+
+  r.h.ah = 0x00;
+  r.h.dl = drive;
+  int86( 0x13, &r, &r );
+}
+
+// Fills in the geometry.  Returns 0 if the drive exists.
+static int bios13Params( DiskInfo *d ) {
+
+  union REGS r;
+  struct SREGS sr;
+
+  // AH=15h: is there a drive at all (0 = no)
+  r.h.ah = 0x15;
+  r.h.dl = d->drive;
+  r.x.cflag = 0;
+  int86( 0x13, &r, &r );
+  if ( !r.x.cflag && (r.h.ah == 0) ) return -1;      // (old BIOSes may not know AH=15h: try AH=08h)
+
+  // AH=08h: CHS geometry
+  r.h.ah = 0x08;
+  r.h.dl = d->drive;
+  r.x.di = 0;
+  segread( &sr );
+  sr.es = 0;
+  int86x( 0x13, &r, &r, &sr );
+  if ( r.x.cflag ) return -1;
+
+  d->spt   = (u8)(r.h.cl & 63);
+  d->heads = (u8)(r.h.dh + 1);
+  d->cyls  = (u16)((((u16)(r.h.cl & 0xC0)) << 2) | r.h.ch) + 1;
+  d->ext   = 0;
+  d->big   = 0;
+
+  if ( (d->spt == 0) || (d->heads == 0) ) return -1;
+
+  u32 chs = (u32)d->cyls * d->heads * d->spt;
+  d->sectors = chs;
+
+  if ( d->drive >= 0x80 ) {
+
+    // AH=41h: are the extensions (LBA, big disks) there?
+    r.h.ah = 0x41;
+    r.x.bx = 0x55AA;
+    r.h.dl = d->drive;
+    int86( 0x13, &r, &r );
+
+    if ( !r.x.cflag && (r.x.bx == 0xAA55) && (r.x.cx & 1) ) {
+
+      ExtParams ep;
+      memset( &ep, 0, sizeof( ep ) );
+      ep.size = 0x1E;
+
+      segread( &sr );
+      r.h.ah = 0x48;
+      r.h.dl = d->drive;
+      r.x.si = FP_OFF( &ep );
+      sr.ds  = FP_SEG( &ep );
+      int86x( 0x13, &r, &r, &sr );
+
+      if ( !r.x.cflag && ((ep.totLo | ep.totHi) != 0) ) {
+        d->ext = 1;
+        if ( ep.totHi != 0 ) { d->big = 1; d->sectors = 0xFFFFFFFFUL; }
+        else                 d->sectors = ep.totLo;
+      }
+    }
+  }
+
+  return 0;
+}
+#endif   // EC_FAKE_DISK
+
+static void imgDescribe( DiskInfo *d ) {
+
+  unsigned long kb = (d->big || (d->sectors > 8000000UL)) ? 0 : (unsigned long)(d->sectors / 2);
+
+  if ( d->big ) {
+    sprintf( d->text, "%s  more than 4 GB", (d->drive < 0x80) ? "Floppy" : "Hard disk" );
+  }
+  else if ( d->drive < 0x80 ) {
+    sprintf( d->text, "Floppy %c:  %lu KB", 'A' + d->drive, kb );
+  }
+  else if ( kb >= 10240UL ) {
+    sprintf( d->text, "Hard disk %u (%02Xh)  %lu MB", d->drive - 0x7F, d->drive, kb / 1024 );
+  }
+  else {
+    sprintf( d->text, "Hard disk %u (%02Xh)  %lu KB", d->drive - 0x7F, d->drive, kb );
+  }
+}
+
+static void imgScan( void ) {
+
+  static const u8 order[] = { 0, 1, 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87 };
+
+  DiskCount = 0;
+
+  for ( int i = 0; i < (int)sizeof( order ); i++ ) {
+
+    DiskInfo *d = &Disks[DiskCount];
+    memset( d, 0, sizeof( DiskInfo ) );
+    d->drive = order[i];
+
+    if ( bios13Params( d ) == 0 ) {
+      imgDescribe( d );
+      DiskCount++;
+    }
+  }
+}
+
+// Memory for the BIOS to read into: it must not cross a 64 KB border.
+static int imgAlloc( void ) {
+
+#ifdef EC_FAKE_DISK
+  ImgWin = malloc( IMG_WIN_SECT * 512 );
+  ImgSeg = 0;
+#else
+  unsigned seg = 0;
+
+  if ( _dos_allocmem( 2048, &seg ) != 0 ) return 0;       // 32 KB
+
+  ImgSeg = seg;
+
+  unsigned long phys = (unsigned long)seg << 4;
+  if ( (phys & 0xFFFFUL) + (IMG_WIN_SECT * 512UL) > 0x10000UL ) phys = (phys | 0xFFFFUL) + 1;
+
+  ImgWin = MK_FP( (unsigned)(phys >> 4), 0 );
+#endif
+
+  ImgTmp = (char *)malloc( IMG_WIN_SECT * 512 );
+  if ( DiskBuf == NULL ) DiskBuf = (char *)malloc( DISK_BUF_SIZE );   // the blocks are sent from it
+  if ( DiskBuf == NULL ) { free( ImgTmp ); ImgTmp = NULL; }
+
+  if ( (ImgWin == NULL) || (ImgTmp == NULL) ) {
+    if ( ImgTmp ) { free( ImgTmp ); ImgTmp = NULL; }
+#ifdef EC_FAKE_DISK
+    if ( ImgWin ) { free( ImgWin ); ImgWin = NULL; }
+#else
+    if ( ImgSeg ) { _dos_freemem( ImgSeg ); ImgSeg = 0; }
+#endif
+    return 0;
+  }
+
+  return 1;
+}
+
+static void imgFree( void ) {
+
+  if ( ImgTmp ) { free( ImgTmp ); ImgTmp = NULL; }
+#ifdef EC_FAKE_DISK
+  if ( ImgWin ) { free( ImgWin ); ImgWin = NULL; }
+#else
+  if ( ImgSeg ) { _dos_freemem( ImgSeg ); ImgSeg = 0; }
+  ImgWin = NULL;
+#endif
+  ImgDisk = NULL;
+}
+
+// One BIOS call for up to IMG_WIN_SECT sectors into the window (a CHS read may not
+// cross the end of a track).  0 = ok, else the BIOS error code.
+static int imgReadOnce( DiskInfo *d, u32 lba, u16 n ) {
+
+  if ( d->ext ) return bios13ReadLba( d->drive, lba, n, ImgWin );
+
+  u16 done = 0;
+
+  while ( done < n ) {
+
+    u32 l = lba + done;
+    u32 track = l / d->spt;
+    u8  sect  = (u8)(l % d->spt) + 1;
+    u8  head  = (u8)(track % d->heads);
+    u16 cyl   = (u16)(track / d->heads);
+    u16 m     = d->spt - (sect - 1);
+
+    if ( m > (n - done) ) m = n - done;
+
+    int rc = bios13ReadChs( d->drive, cyl, head, sect, (u8)m, (char __far *)ImgWin + (u16)(done * 512) );
+    if ( rc ) return rc;
+
+    done += m;
+  }
+
+  return 0;
+}
+
+static int imgReadTries( DiskInfo *d, u32 lba, u16 n ) {
+
+  int rc = 0;
+
+  for ( int t = 0; t < 3; t++ ) {
+    rc = imgReadOnce( d, lba, n );
+    if ( rc == 0 ) return 0;
+    bios13Reset( d->drive );
+  }
+
+  return rc;
+}
+
+// n (1..32) sectors from lba into dst.  A sector that cannot be read becomes zeros.
+static void imgReadBlock( u32 lba, u16 n, char *dst ) {
+
+  DiskInfo *d = ImgDisk;
+
+  if ( imgReadTries( d, lba, n ) == 0 ) {
+    _fmemcpy( dst, ImgWin, (unsigned)n * 512 );
+    return;
+  }
+
+  // Somewhere in this block: find it sector by sector.
+  for ( u16 i = 0; i < n; i++ ) {
+
+    if ( imgReadTries( d, lba + i, 1 ) == 0 ) {
+      _fmemcpy( dst + (unsigned)i * 512, ImgWin, 512 );
+    }
+    else {
+      memset( dst + (unsigned)i * 512, 0, 512 );
+      if ( ImgBad < 8 ) ImgBadFirst[ImgBad] = lba + i;
+      ImgBad++;
+    }
+  }
+}
+
+// Bytes [off, off+n) of the image into dst (n <= 16384, off may be anything).
+static void imgReadBytes( u32 off, u16 n, char *dst ) {
+
+  u32 pos = off;
+  u16 left = n;
+
+  while ( left > 0 ) {
+
+    u32 lba = pos / 512;
+    u16 skip = (u16)(pos % 512);
+    u16 cnt = (u16)(((u32)skip + left + 511) / 512);
+
+    if ( cnt > IMG_WIN_SECT ) cnt = IMG_WIN_SECT;
+
+    imgReadBlock( lba, cnt, ImgTmp );
+
+    u16 take = (u16)((u32)cnt * 512 - skip);
+    if ( take > left ) take = left;
+
+    memcpy( dst, ImgTmp + skip, take );
+
+    dst += take;
+    pos += take;
+    left -= take;
+  }
+}
+
+// CRC32 of the whole image (the host asks for it after it resumed an interrupted file).
+static void imgCrc( uint32_t *crcOut ) {
+
+  uint32_t crc = 0xFFFFFFFFUL;
+  u32 off = 0;
+  unsigned long badBefore = ImgBad;
+
+  while ( off < ImgBytes ) {
+
+    u32 n = ImgBytes - off;
+    if ( n > 16384UL ) n = 16384UL;
+
+    imgReadBytes( off, (u16)n, DiskBuf );
+
+    uint16_t done = 0;
+    while ( done < (uint16_t)n ) {
+      uint16_t c = ((uint16_t)n - done > 4096) ? 4096 : ((uint16_t)n - done);
+      if ( FastCrc && FastCrcOk ) crc = crcFast( crc, (const uint8_t *)DiskBuf + done, c );
+      else                        crc = crcStandard( crc, (const uint8_t *)DiskBuf + done, c );
+      done += c;
+    }
+
+    off += n;
+    pump( );
+  }
+
+  ImgBad = badBefore;                // the sectors were counted when they were sent
+  *crcOut = crc ^ 0xFFFFFFFFUL;
+}
+
+
 // ---- the list of what is offered ----
 
 // Adds everything below a local folder.  UpDir is its path on the disk, UpRel
@@ -2913,7 +3286,7 @@ static int upAnswerGet( char *arg ) {
   char full[300];
   char line[80];
   char type;
-  u32 listed;
+  u32 listed = 0;
   u16 d, t;
 
   // arg: "<path> <offset> <length>"
@@ -2945,6 +3318,8 @@ static int upAnswerGet( char *arg ) {
     return txLine( "ERR 404 Not offered" ) || txFlush( ) ? -1 : 0;
   }
 
+  int isImg = (ImgDisk != NULL) && (stricmp( rel, ImgName ) == 0);
+
   // A new file: progress and open it.
   if ( stricmp( rel, UpName ) != 0 ) {
 
@@ -2960,41 +3335,65 @@ static int upAnswerGet( char *arg ) {
     ProgName[12] = 0;
     progressUpdate( 1 );
 
-    joinPath( full, Right.path, rel );
-    UpFile = fopen( full, "rb" );
+    if ( !isImg ) {
 
-    if ( UpFile == NULL ) {
-      return txLine( "ERR 403 Cannot open the file" ) || txFlush( ) ? -1 : 0;
+      joinPath( full, Right.path, rel );
+      UpFile = fopen( full, "rb" );
+
+      if ( UpFile == NULL ) {
+        return txLine( "ERR 403 Cannot open the file" ) || txFlush( ) ? -1 : 0;
+      }
     }
 
     strcpy( UpName, rel );
   }
 
-  if ( UpFile == NULL ) {
-    return txLine( "ERR 403 Cannot open the file" ) || txFlush( ) ? -1 : 0;
+  u32 fsize;
+  u32 n;
+
+  if ( isImg ) {
+
+    fsize = ImgBytes;
+
+    if ( off >= fsize ) {
+      return txLine( "ERR 400 Past the end of the file" ) || txFlush( ) ? -1 : 0;
+    }
+
+    n = fsize - off;
+    if ( n > want ) n = want;
+    if ( n > DISK_BUF_SIZE ) n = DISK_BUF_SIZE;
+
+    // Unreadable sectors become zeros (counted), so this does not fail.
+    imgReadBytes( off, (u16)n, DiskBuf );
   }
+  else {
 
-  fseek( UpFile, 0, SEEK_END );
-  u32 fsize = (u32)ftell( UpFile );
+    if ( UpFile == NULL ) {
+      return txLine( "ERR 403 Cannot open the file" ) || txFlush( ) ? -1 : 0;
+    }
 
-  if ( off >= fsize ) {
-    return txLine( "ERR 400 Past the end of the file" ) || txFlush( ) ? -1 : 0;
-  }
+    fseek( UpFile, 0, SEEK_END );
+    fsize = (u32)ftell( UpFile );
 
-  u32 n = fsize - off;
-  if ( n > want ) n = want;
-  if ( n > DISK_BUF_SIZE ) n = DISK_BUF_SIZE;
+    if ( off >= fsize ) {
+      return txLine( "ERR 400 Past the end of the file" ) || txFlush( ) ? -1 : 0;
+    }
 
-  // Read first, answer afterwards: a read error then fails only this file.
-  size_t got = 0;
+    n = fsize - off;
+    if ( n > want ) n = want;
+    if ( n > DISK_BUF_SIZE ) n = DISK_BUF_SIZE;
 
-  if ( fseek( UpFile, (long)off, SEEK_SET ) == 0 ) {
-    got = fread( DiskBuf, 1, (size_t)n, UpFile );
-  }
+    // Read first, answer afterwards: a read error then fails only this file.
+    size_t got = 0;
 
-  if ( got != (size_t)n ) {
-    upCloseFile( );
-    return txLine( "ERR 403 Read error" ) || txFlush( ) ? -1 : 0;
+    if ( fseek( UpFile, (long)off, SEEK_SET ) == 0 ) {
+      got = fread( DiskBuf, 1, (size_t)n, UpFile );
+    }
+
+    if ( got != (size_t)n ) {
+      upCloseFile( );
+      return txLine( "ERR 403 Read error" ) || txFlush( ) ? -1 : 0;
+    }
   }
 
   sprintf( line, "OK %lu %lu", (unsigned long)n, (unsigned long)fsize );
@@ -3033,12 +3432,18 @@ static int upAnswerCrc( char *arg ) {
     return txLine( "ERR 404 Not offered" ) || txFlush( ) ? -1 : 0;
   }
 
-  joinPath( full, Right.path, rel );
-
   uint32_t crc = 0, size = 0;
 
-  if ( crcOfFile( full, &crc, &size ) != 0 ) {
-    return txLine( "ERR 403 Read error" ) || txFlush( ) ? -1 : 0;
+  if ( (ImgDisk != NULL) && (stricmp( rel, ImgName ) == 0) ) {
+    imgCrc( &crc );
+    size = ImgBytes;
+  }
+  else {
+    joinPath( full, Right.path, rel );
+
+    if ( crcOfFile( full, &crc, &size ) != 0 ) {
+      return txLine( "ERR 403 Read error" ) || txFlush( ) ? -1 : 0;
+    }
   }
 
   sprintf( line, "OK %lu %08lX", (unsigned long)size, (unsigned long)crc );
@@ -3267,24 +3672,9 @@ static void cmdInboxMakeDir( void ) {
   fixView( &Left );
 }
 
-static void cmdSend( void ) {
-
-  if ( Active != 1 ) {
-    uiMessage( "Send", "Select files in the right (local) panel,", "then press F5." );
-    return;
-  }
-
-  buildLocalList( &Right );
-
-  if ( TreeTooBig ) {
-    uiMessage( "Send", "That is too many files for one go.", "Select fewer folders at a time." );
-    return;
-  }
-
-  if ( TreeFiles == 0 ) {
-    uiMessage( "Send", "Nothing to send (no files).", NULL );
-    return;
-  }
+// Sends what is in TreeBuf (files of the local panel, or the disk image): asks, offers,
+// and answers the host's questions.  what = "files" or "disk image"; from = where it comes from.
+static void sendOffered( const char *what, const char *from ) {
 
   if ( !ensureConnected( ) ) {
     uiMessage( "Send", "Connection problem:", ErrMsg );
@@ -3297,14 +3687,22 @@ static void cmdSend( void ) {
     const char *lines[4];
     int nl = 0;
 
-    sprintf( s1, "%lu file(s), %lu bytes", TreeFiles, (unsigned long)TreeBytes );
-    sprintf( s2, "from  %.36s", Right.path );
+    if ( ImgDisk ) sprintf( s1, "%s: %.30s", what, ImgName );
+    else           sprintf( s1, "%lu file(s), %lu bytes", TreeFiles, (unsigned long)TreeBytes );
+    sprintf( s2, "from  %.36s", from );
     sprintf( s3, "to    host inbox %.20s", Left.path );
 
     lines[nl++] = s1;
     lines[nl++] = s2;
     lines[nl++] = s3;
-    if ( isRemoteRoot( Left.path ) ) lines[nl++] = "(the host makes a new folder for them)";
+    if ( ImgDisk ) {
+      char *s4 = (char *)ImgTmp;                 // (the buffer is free here)
+      sprintf( s4, "%lu bytes", (unsigned long)ImgBytes );
+      lines[nl++] = s4;
+    }
+    else if ( isRemoteRoot( Left.path ) ) {
+      lines[nl++] = "(the host makes a new folder for them)";
+    }
 
     if ( !uiDialog( "Send to the host", lines, nl, 1 ) ) return;
   }
@@ -3352,8 +3750,8 @@ static void cmdSend( void ) {
 
   {
     u32 ms = (u32)(uiTicks( ) - ProgStart) * 55;
-    char s1[90], s2[90], s3[100];
-    const char *lines[4];
+    char s1[90], s2[90], s3[100], s4[100];
+    const char *lines[5];
     int nl = 0;
 
     if ( res == 0 ) {
@@ -3379,13 +3777,157 @@ static void cmdSend( void ) {
       lines[nl++] = s3;
     }
 
+    if ( ImgDisk && (ImgBad > 0) ) {
+      sprintf( s4, "%lu unreadable sector(s), sent as zeros. First: %lu", ImgBad, ImgBadFirst[0] );
+      lines[nl++] = s4;
+    }
+
     uiDialog( (res == 0) ? "Done" : (res == 1) ? "Cancelled" : "Stopped", lines, nl, 0 );
   }
 
-  selectAll( &Right, 0 );
+  if ( !ImgDisk ) selectAll( &Right, 0 );
 
   // Show what arrived: the inbox in the left panel, in the same folder.
   if ( Connected || ensureConnected( ) ) reloadRemote( &Left );
+}
+
+
+static void cmdSend( void ) {
+
+  if ( Active != 1 ) {
+    uiMessage( "Send", "Select files in the right (local) panel,", "then press F5." );
+    return;
+  }
+
+  buildLocalList( &Right );
+
+  if ( TreeTooBig ) {
+    uiMessage( "Send", "That is too many files for one go.", "Select fewer folders at a time." );
+    return;
+  }
+
+  if ( TreeFiles == 0 ) {
+    uiMessage( "Send", "Nothing to send (no files).", NULL );
+    return;
+  }
+
+  char s2[60];
+  sprintf( s2, "%.46s", Right.path );
+
+  sendOffered( "files", s2 );
+}
+
+
+// The packed DOS date and time of "now" (the image is made now).
+static void nowStamp( u16 *date, u16 *time ) {
+
+  struct dosdate_t dd;
+  struct dostime_t dt;
+
+  _dos_getdate( &dd );
+  _dos_gettime( &dt );
+
+  *date = (u16)(((dd.year - 1980) << 9) | (dd.month << 5) | dd.day);
+  *time = (u16)((dt.hour << 11) | (dt.minute << 5) | (dt.second / 2));
+}
+
+// Lets the user pick a disk.  Returns its index in Disks, or -1 for Esc.
+static int chooseDisk( void ) {
+
+  int sel = 0;
+  int w = 52;
+  int h = DiskCount + 6;
+  int x = (SCR_W - w) / 2;
+  int y = (25 - h) / 2;
+  const char *hint = "Arrows + Enter, Esc = cancel";
+
+  while ( 1 ) {
+
+    dialogFrame( x, y, w, h, "Disk image" );
+    putStr( x + 3, y + 1, "Which disk?", A_DLG );
+
+    for ( int i = 0; i < DiskCount; i++ ) {
+      putStrPad( x + 3, y + 3 + i, Disks[i].text, w - 6, (i == sel) ? A_CURSOR : A_DLG );
+    }
+
+    putStr( x + (w - (int)strlen( hint )) / 2, y + h - 2, hint, A_DLGHINT );
+
+    int k = uiReadKey( );
+
+    if ( k == K_UP )   sel = (sel + DiskCount - 1) % DiskCount;
+    if ( k == K_DOWN ) sel = (sel + 1) % DiskCount;
+    if ( k == 13 )     return sel;
+    if ( k == 27 )     return -1;
+  }
+}
+
+// Sends one disk as a file called <name>.IMG (the name is made 8.3 and upper case).
+static void sendDisk( DiskInfo *d, const char *name ) {
+
+  char base[10];
+  int n = 0;
+
+  for ( const char *c = name; *c && (n < 8); c++ ) {
+    if ( isalnum( (unsigned char)*c ) || (*c == '_') || (*c == '-') ) base[n++] = (char)toupper( (unsigned char)*c );
+  }
+  base[n] = 0;
+  if ( n == 0 ) strcpy( base, "DISK" );
+
+  sprintf( ImgName, "%s.IMG", base );
+
+  ImgDisk = d;
+  ImgBytes = d->sectors * 512UL;
+  ImgBad = 0;
+
+  u16 date, time;
+  nowStamp( &date, &time );
+
+  TreeUsed = 0;
+  TreeEntries = TreeFiles = TreeDirs = TreeBad = 0;
+  TreeBytes = 0;
+  TreeTooBig = 0;
+  addEntryEx( 'F', ImgName, ImgBytes, date, time, (u8)((time & 31) * 2), 0 );
+
+  char from[40];
+  sprintf( from, "%.38s", d->text );
+
+  sendOffered( "disk image", from );
+
+  imgFree( );
+}
+
+// F6 (upload mode): send a whole disk as an image file.
+static void cmdImage( void ) {
+
+  imgScan( );
+
+  if ( DiskCount == 0 ) {
+    uiMessage( "Disk image", "No disk found through the BIOS.", NULL );
+    return;
+  }
+
+  int i = chooseDisk( );
+  if ( i < 0 ) return;
+
+  DiskInfo *d = &Disks[i];
+
+  if ( d->big ) {
+    uiMessage( "Disk image", "That disk is larger than 4 GB:", "not supported yet." );
+    return;
+  }
+
+  char name[16];
+  sprintf( name, "%s%02X", (d->drive < 0x80) ? "FLOPPY" : "DISK", d->drive );
+  if ( d->drive < 0x80 ) sprintf( name, "FLOPPY%c", 'A' + d->drive );
+
+  if ( !inputBox( "Disk image", "File name (.IMG is added):", name, 8 ) ) return;
+
+  if ( !imgAlloc( ) ) {
+    uiMessage( "Disk image", "Not enough free memory.", "(leave other programs out)" );
+    return;
+  }
+
+  sendDisk( d, name );
 }
 
 #endif    // EC_UPLOAD
@@ -4190,7 +4732,8 @@ static void cmdHelp( void ) {
   lines[14] = memLine;
 
 #ifdef EC_UPLOAD
-  lines[13] = "F4          upload mode: left = host inbox; F5 sends right >>, or gets <<";
+  lines[12] = "F4 / F6     upload mode (left = host inbox) / send a whole disk as .IMG";
+  lines[13] = "F5          in upload mode: sends right >>, or gets <<";
   lines[14] = "Ctrl+O      look at the DOS screen (any key returns)";
   lines[15] = memLine;
   uiDialog( "Easy Commander - help", lines, 16, 0 );
@@ -4323,6 +4866,7 @@ static void handleKey( int k ) {
     case K_CTRL_O: cmdDosScreen( ); break;
 #ifdef EC_UPLOAD
     case K_F4:   cmdUploadMode( ); break;
+    case K_F6:   if ( UploadMode ) cmdImage( ); break;
     case K_F5:   if ( UploadMode && (Active == 1) ) cmdSend( ); else cmdDownload( ); break;
 #else
     case K_F5:   cmdDownload( ); break;
